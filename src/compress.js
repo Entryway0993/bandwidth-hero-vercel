@@ -175,9 +175,9 @@ function parseCompressionParams(req) {
 function buildFormatOptions(format, quality, width, height, isAnimated) {
   if (format === 'webp') {
     return {
-      quality: isAnimated ? 40 : quality,
-      alphaQuality: 50,
-      effort: 5,
+      quality: isAnimated ? 35 : quality,
+      alphaQuality: 45,
+      effort: 6,
       smartSubsample: true,
       minSize: true,
       ...(isAnimated && { loop: 0 }),
