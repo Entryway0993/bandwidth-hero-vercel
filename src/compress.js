@@ -172,19 +172,29 @@ function parseCompressionParams(req) {
 }
 
 function buildFormatOptions(format, quality, width, height, isAnimated) {
-  const base = {
+  if (format === 'webp') {
+    return {
+      quality: isAnimated ? 75 : quality,
+      alphaQuality: 70,
+      effort: 6,
+      smartSubsample: true,
+      minSize: true,
+      mixed: true,
+      ...(isAnimated && { loop: 0 }),
+    };
+  }
+  if (format === 'avif') {
+    return {
+      quality,
+      effort: 4,
+      ...avifTileParams(width * height),
+    };
+  }
+  return {
     quality,
-    alphaQuality:       80,
-    bitdepth:           8,
-    chromaSubsampling:  '4:2:0',
-    speed:              6,
-    ...(isAnimated && { loop: 0 }),
+    chromaSubsampling: '4:2:0',
   };
-
-  return format === 'avif'
-    ? { ...base, ...avifTileParams(width * height) }
-    : base;
-}
+    }
 
 function avifTileParams(area) {
   if (area > LARGE_IMAGE_PIXELS)  return { tileRows: 1, tileCols: 1, minQuantizer: 20, maxQuantizer: 40, effort: 3 };
