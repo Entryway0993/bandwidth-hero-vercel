@@ -21,9 +21,11 @@ function safeCompare(a, b) {
  */
 export default function authenticate(req, res, next) {
   // Skip authentication if no credentials are set (development mode)
+  // Skip authentication if no credentials are set (development mode)
+  if (!LOGIN || !PASSWORD) return next();
+
   const API_KEY = process.env.API_KEY;
   if (API_KEY && req.query.key && safeCompare(String(req.query.key), API_KEY)) return next();
-  }
 
   const credentials = auth(req);
 
