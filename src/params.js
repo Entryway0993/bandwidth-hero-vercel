@@ -108,6 +108,30 @@ function params(req, res, next) {
         error: 'Invalid URL. Ensure it includes a valid protocol and domain.',
       });
     }
+    
+        // SSRF guard: block private/internal addresses
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      const blocked =
+        hostname === 'localhost' ||
+        hostname === '0.0.0.0' ||
+        hostname === '::1' ||
+        hostname === '[::1]' ||
+        hostname.endsWith('.local') ||
+        hostname.endsWith('.internal') ||
+        /^127\./.test(hostname) ||
+        /^10\./.test(hostname) ||
+        /^192\.168\./.test(hostname) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+        /^169\.254\./.test(hostname) ||
+        /^fc00:/i.test(hostname) ||
+        /^fe80:/i.test(hostname);
+      if (blocked) {
+        return res.status(403).json({ error: 'Forbidden: internal address' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'Malformed URL after normalization' });
+    }
 
     // Safe params extraction
     req.params = {
