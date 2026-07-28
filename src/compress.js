@@ -84,18 +84,19 @@ export default async function compress(req, res, input) {
 
 // ─── Pipeline Builder ─────────────────────────────────────────────────────────
 
-function buildPipeline(source, { grayscale, width, height }) {
+function buildPipeline(source, { grayscale, width, height, isAnimated }) {
   let pipe = source.clone();
 
   if (grayscale) {
     pipe = pipe.grayscale();
   }
 
-  const needsResize = width > MAX_DIMENSION || height > MAX_DIMENSION;
+  const cap = isAnimated ? 600 : MAX_DIMENSION;
+const needsResize = width > cap || height > cap;
   if (needsResize) {
     pipe = pipe.resize({
-      width:               Math.min(width, MAX_DIMENSION),
-      height:              Math.min(height, MAX_DIMENSION),
+      width:               Math.min(width, cap),
+      height:              Math.min(height, cap),
       fit:                 'inside',
       withoutEnlargement: true,
     });
@@ -174,8 +175,8 @@ function parseCompressionParams(req) {
 function buildFormatOptions(format, quality, width, height, isAnimated) {
   if (format === 'webp') {
     return {
-      quality: isAnimated ? 75 : quality,
-      alphaQuality: 70,
+      quality: isAnimated ? 65 : quality,
+      alphaQuality: 50,
       effort: 5,
       smartSubsample: true,
       minSize: true,
