@@ -82,7 +82,7 @@ export default async function compress(req, res, input) {
     const { data, info } = await pipeline.toBuffer({ resolveWithObject: true });
 
     sendImage(res, data, format, {
-      url:        req.params.url ?? '',
+      url: req.query.url || req.params.url || '',
       originSize: req.params.originSize ?? 0,
       bytesSaved: Math.max((req.params.originSize ?? 0) - info.size, 0),
     });
@@ -241,13 +241,17 @@ class CompressionError extends Error {
 }
 
 function fail(err, req, res) {
-  const isDev = process.env.NODE_ENV === 'development';
+  // Skip logging for expected timeout/abort errors
+  if (err?.name === 'AbortError' || err?.code === 'ETIMEDOUT') {
+    return redirect(req, res);
+  }
 
+  const isDev = process.env.NODE_ENV === 'development';
   console.error(JSON.stringify({
     level:      'error',
     message:    err?.message,
     statusCode: err?.statusCode,
-    url:        req?.params?.url?.slice(0, 100),
+    url:        (req.query.url || req.params.url || '').slice(0, 100),
     cause:      err?.cause?.message,
     ...(isDev && { stack: err?.stack }),
   }));
