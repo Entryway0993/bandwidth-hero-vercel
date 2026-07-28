@@ -13,7 +13,7 @@ const MAX_DIMENSION        = 16_384;
 const LARGE_IMAGE_PIXELS   = 4_000_000;
 const MEDIUM_IMAGE_PIXELS  = 1_000_000;
 const MAX_PIXEL_LIMIT      = 100_000_000;
-const PROCESSING_TIMEOUT   = 60_000;
+const PROCESSING_TIMEOUT   = 55_000;
 
 // ─── Main Entry Point ─────────────────────────────────────────────────────────
 
