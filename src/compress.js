@@ -176,10 +176,9 @@ function buildFormatOptions(format, quality, width, height, isAnimated) {
     return {
       quality: isAnimated ? 75 : quality,
       alphaQuality: 70,
-      effort: 6,
+      effort: 4,
       smartSubsample: true,
       minSize: true,
-      mixed: true,
       ...(isAnimated && { loop: 0 }),
     };
   }
