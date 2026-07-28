@@ -1,23 +1,17 @@
-#!/usr/bin/env node
-'use strict';
-
 import express from 'express';
 import morgan from 'morgan';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import authenticate from './src/authenticate.js';
-import params from './src/params.js';
 import proxy from './src/proxy.js';
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
-const PORT = parseInt(process.env.PORT, 10) || 443;
+const PORT = parseInt(process.env.PORT, 10) || 3000;
 
-// Security Middleware
+// Security
 app.use(helmet.hidePoweredBy());
-app.use(helmet.xssFilter());
 app.use(helmet.noSniff());
 app.use(helmet.ieNoOpen());
 app.use(helmet.frameguard({ action: 'deny' }));
@@ -31,22 +25,20 @@ app.use(
   })
 );
 
-// HTTP request logging
+// Logging
 app.use(morgan('combined'));
 
-// Trust proxy for secure cookies and HTTPS redirection
+// Trust proxy
 app.enable('trust proxy');
 
-// Routes
-app.use(authenticate, proxy); 
-
-// Health check route
+// Public routes (no auth)
 app.get('/healthz', (req, res) => res.status(200).send('OK'));
-
-// Handle favicon requests
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-// Start server
+// Authenticated proxy
+app.use(authenticate, proxy);
+
+// Start
 app.listen(PORT, () => {
   console.log(`Listening on port ${PORT}`);
 });
