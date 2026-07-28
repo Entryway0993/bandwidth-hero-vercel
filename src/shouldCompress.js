@@ -77,7 +77,7 @@ export default function shouldCompress(req, buffer) {
   // Unless your 'compress' module explicitly handles frame extraction and re-encoding,
   // it is safer to bypass them.
   try {
-    if (isAnimated(buffer)) {
+    if (isAnimated(buffer) && originSize > 14 * 1024 * 1024) {
       return logSkip('animated', { originType });
     }
   } catch (err) {
