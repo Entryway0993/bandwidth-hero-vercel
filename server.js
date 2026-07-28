@@ -38,7 +38,7 @@ app.use(morgan('combined'));
 app.enable('trust proxy');
 
 // Routes
-app.get('/:key', authenticate, proxy);
+app.use(authenticate, proxy); 
 
 // Health check route
 app.get('/healthz', (req, res) => res.status(200).send('OK'));
