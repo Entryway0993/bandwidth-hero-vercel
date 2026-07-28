@@ -25,7 +25,7 @@ export default function authenticate(req, res, next) {
   if (!LOGIN || !PASSWORD) return next();
 
   const API_KEY = process.env.API_KEY;
-  if (API_KEY && req.query.key && safeCompare(String(req.query.key), API_KEY)) return next();
+  if (API_KEY && req.params.key && safeCompare(String(req.params.key), API_KEY)) return next();
 
   const credentials = auth(req);
 
