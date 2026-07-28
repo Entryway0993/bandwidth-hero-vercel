@@ -16,10 +16,9 @@ const MIN_QUALITY = clampInt(process.env.MIN_QUALITY, 10, 1, 100);
  */
 function normalizeUrl(input) {
   if (typeof input !== 'string') return '';
-  
+
   let decoded;
 
-  // 1️⃣ Decode query param ONCE
   try {
     decoded = decodeURIComponent(input);
   } catch {
@@ -33,7 +32,6 @@ function normalizeUrl(input) {
     return '';
   }
 
-  // 2️⃣ Encode ONLY path segments
   url.pathname = url.pathname
     .split('/')
     .map(seg => encodeURIComponent(decodeURIComponent(seg)))
@@ -84,7 +82,6 @@ function params(req, res, next) {
     let { url } = req.query;
 
     if (!url) {
-      // Health-check / base response
       return res.status(200).send('bandwidth-hero-proxy');
     }
 
@@ -93,7 +90,7 @@ function params(req, res, next) {
       url = url[0];
     }
 
-    // Fast precheck (saves CPU if malformed)
+    // Fast precheck
     if (!/^https?:\/\//i.test(url)) {
       return res.status(400).json({
         error: 'Invalid URL. Must include protocol (http or https).',
@@ -108,8 +105,8 @@ function params(req, res, next) {
         error: 'Invalid URL. Ensure it includes a valid protocol and domain.',
       });
     }
-    
-        // SSRF guard: block private/internal addresses
+
+    // SSRF guard: block private/internal addresses
     try {
       const hostname = new URL(url).hostname.toLowerCase();
       const blocked =
@@ -140,6 +137,7 @@ function params(req, res, next) {
       webp: !req.query.jpeg,
       grayscale: parseBoolean(req.query.bw, true),
       quality: parseQuality(req.query.l, DEFAULT_QUALITY, MIN_QUALITY, MAX_QUALITY),
+      maxWidth: clampInt(req.query.w, 0, 0, 4096),
     };
 
     return next();
@@ -151,14 +149,3 @@ function params(req, res, next) {
 }
 
 export default params;
-
-
-
-
-
-
-
-
-
-
-
