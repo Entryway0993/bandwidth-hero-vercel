@@ -55,7 +55,7 @@ export default async function compress(req, res, input) {
     const formatOpts   = buildFormatOptions(format, params.quality, width, height, isAnimated);
 
     // Build the Sharp pipeline
-    pipeline = buildPipeline(source, { grayscale: params.grayscale, width, height });
+    pipeline = buildPipeline(source, { grayscale: params.grayscale, width, height, isAnimated });
     pipeline = pipeline.toFormat(format, formatOpts);
 
     // ── Stream path: large buffers skip toBuffer() to save RAM ───────────────
