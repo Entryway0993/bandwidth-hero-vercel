@@ -5,7 +5,7 @@ import sanitizeFilename from 'sanitize-filename';
 
 // ─── Sharp Global Config ──────────────────────────────────────────────────────
 sharp.cache({ memory: 50, files: 0 });
-sharp.concurrency(1);
+sharp.concurrency(2);
 sharp.simd(true);
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -50,7 +50,20 @@ export default async function compress(req, res, input) {
     if (pixelCount > MAX_PIXEL_LIMIT) {
       throw new CompressionError('Image exceeds maximum pixel limit', 413);
     }
-
+// Fast path: skip heavy encoding for small non-animated images
+    const isSmall = Buffer.isBuffer(input) && input.length < 100_000 && pages === 1;
+    if (isSmall) {
+      const fastFormat = params.format;
+      const { data, info } = await source
+        .toFormat(fastFormat, { quality: 80 })
+        .toBuffer({ resolveWithObject: true });
+      sendImage(res, data, fastFormat, {
+        url: req.query.url || req.params.url || '',
+        originSize: req.params.originSize ?? 0,
+        bytesSaved: Math.max((req.params.originSize ?? 0) - info.size, 0),
+      });
+      return;
+    }
     const format       = isAnimated ? 'webp' : params.format;
     const formatOpts   = buildFormatOptions(format, params.quality, width, height, isAnimated);
 
