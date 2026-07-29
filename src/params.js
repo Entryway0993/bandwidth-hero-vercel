@@ -131,8 +131,7 @@ function params(req, res, next) {
     }
 
     // Safe params extraction
-    req.params = {
-      ...req.params,
+        req.opts = {
       url,
       webp: !req.query.jpeg,
       grayscale: parseBoolean(req.query.bw, true),
