@@ -35,7 +35,6 @@ app.enable('trust proxy');
 // Public routes (no auth)
 app.get('/healthz', (req, res) => res.status(200).send('OK'));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
-app.get('/debug', params, (req, res) => res.json(req.opts));
 
 // Authenticated proxy
 app.use(authenticate, params, proxy);
