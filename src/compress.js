@@ -5,6 +5,9 @@ sharp.cache({ memory: 50, files: 0 });
 sharp.concurrency(1);
 sharp.simd(true);
 
+// AVIF and WebP both cap at 16383px per dimension. JPEG handles up to 65535.
+const MAX_CODEC_DIM = 16383;
+
 /**
  * Compresses an image buffer based on request params.
  * Outputs directly to response.
@@ -19,7 +22,17 @@ async function compress(req, res, inputBuffer) {
   }).metadata();
 
   const animated = (metadata.pages || 1) > 1;
-  const totalPixels = (metadata.width || 0) * (metadata.height || 0);
+
+  // Effective output dimensions (after optional resize)
+  let outWidth = metadata.width || 0;
+  let outHeight = metadata.height || 0;
+  if (maxWidth > 0 && outWidth > maxWidth) {
+    const scale = maxWidth / outWidth;
+    outWidth = maxWidth;
+    outHeight = Math.round(outHeight * scale);
+  }
+  const maxDim = Math.max(outWidth, outHeight);
+  const totalPixels = outWidth * outHeight;
 
   // Build processing pipeline
   const instance = sharp(inputBuffer, {
@@ -37,6 +50,13 @@ async function compress(req, res, inputBuffer) {
     instance.resize({ width: maxWidth, withoutEnlargement: true });
   }
 
+  // Catch encode errors so the function never hangs until timeout
+  instance.on('error', (err) => {
+    console.error('❌ Sharp encode error:', err.message);
+    if (!res.headersSent) res.status(500).end();
+    else res.end();
+  });
+
   // Format selection + stream to response
   if (animated) {
     res.setHeader('Content-Type', 'image/webp');
@@ -44,14 +64,14 @@ async function compress(req, res, inputBuffer) {
       .webp({ quality, effort: 4, smartSubsample: true, animated: true })
       .pipe(res);
   } else if (req.opts.webp) {
-    if (totalPixels > 30_000_000) {
-      // Extreme (30M+): JPEG — safety valve, never times out
+    if (maxDim > MAX_CODEC_DIM || totalPixels > 30_000_000) {
+      // Too tall/large for AVIF/WebP — JPEG is the only codec that fits
       res.setHeader('Content-Type', 'image/jpeg');
       instance
         .jpeg({ quality, progressive: true, mozjpeg: true })
         .pipe(res);
     } else if (totalPixels > 3_000_000) {
-      // Tall strips (3M-30M): AVIF effort 2 — best compression, still fast
+      // Tall strips (3M-30M, within codec limits): AVIF effort 2
       res.setHeader('Content-Type', 'image/avif');
       instance
         .avif({ quality, effort: 2 })
