@@ -41,7 +41,7 @@ function detectContentType(buffer) {
 
 // --- Main Proxy ---
 export default async function proxy(req, res) {
-    const targetUrl = req.opts.url;
+  const targetUrl = req.opts.url;
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing URL parameter' });
   }
@@ -78,10 +78,13 @@ export default async function proxy(req, res) {
       return bypass(req, res, rawBody);
     }
 
-    // Determine Content-Type
+    // Determine Content-Type — trust magic bytes whenever the header isn't a clean image type
     let contentType = headers['content-type'];
-    if (!contentType || contentType === 'application/octet-stream') {
-      contentType = detectContentType(rawBody);
+    if (!contentType || !contentType.trim().toLowerCase().startsWith('image/')) {
+      const detected = detectContentType(rawBody);
+      if (detected.startsWith('image/')) {
+        contentType = detected;
+      }
     }
 
     // Remove encoding headers (got already decoded)
