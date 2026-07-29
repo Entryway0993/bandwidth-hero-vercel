@@ -18,8 +18,8 @@ async function compress(req, res, inputBuffer) {
     limitInputPixels: 50_000_000,
   }).metadata();
 
-  // Sharp reports pages > 1 for animated images. No false positives.
   const animated = (metadata.pages || 1) > 1;
+  const totalPixels = (metadata.width || 0) * (metadata.height || 0);
 
   // Build processing pipeline
   const instance = sharp(inputBuffer, {
@@ -44,10 +44,26 @@ async function compress(req, res, inputBuffer) {
       .webp({ quality, effort: 4, smartSubsample: true, animated: true })
       .pipe(res);
   } else if (req.opts.webp) {
-    res.setHeader('Content-Type', 'image/avif');
-    instance
-      .avif({ quality, effort: 4 })
-      .pipe(res);
+    // Adaptive: huge images get lower effort or JPEG fallback
+    if (totalPixels > 20_000_000) {
+      // Extreme (800×25000+): JPEG — fast encode, no timeout
+      res.setHeader('Content-Type', 'image/jpeg');
+      instance
+        .jpeg({ quality, progressive: true, mozjpeg: true })
+        .pipe(res);
+    } else if (totalPixels > 8_000_000) {
+      // Tall strip (800×10000+): AVIF effort 2 — still small, much faster
+      res.setHeader('Content-Type', 'image/avif');
+      instance
+        .avif({ quality, effort: 2 })
+        .pipe(res);
+    } else {
+      // Normal page: AVIF effort 4 — best compression
+      res.setHeader('Content-Type', 'image/avif');
+      instance
+        .avif({ quality, effort: 4 })
+        .pipe(res);
+    }
   } else {
     res.setHeader('Content-Type', 'image/jpeg');
     instance
