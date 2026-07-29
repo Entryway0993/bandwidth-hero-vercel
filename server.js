@@ -3,6 +3,7 @@ import morgan from 'morgan';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import authenticate from './src/authenticate.js';
+import params from './src/params.js';
 import proxy from './src/proxy.js';
 
 dotenv.config();
@@ -36,7 +37,7 @@ app.get('/healthz', (req, res) => res.status(200).send('OK'));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // Authenticated proxy
-app.use(authenticate, proxy);
+app.use(authenticate, params, proxy);
 
 // Start
 app.listen(PORT, () => {
