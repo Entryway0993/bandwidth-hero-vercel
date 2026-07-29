@@ -41,7 +41,7 @@ function detectContentType(buffer) {
 
 // --- Main Proxy ---
 export default async function proxy(req, res) {
-  const targetUrl = req.query.url || req.opts.url;
+    const targetUrl = req.opts.url;
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing URL parameter' });
   }
