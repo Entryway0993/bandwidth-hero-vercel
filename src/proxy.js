@@ -41,7 +41,7 @@ function detectContentType(buffer) {
 
 // --- Main Proxy ---
 export default async function proxy(req, res) {
-  const targetUrl = req.query.url || req.params.url;
+  const targetUrl = req.query.url || req.opts.url;
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing URL parameter' });
   }
@@ -97,8 +97,8 @@ export default async function proxy(req, res) {
     res.setHeader('x-proxy-cache', 'MISS');
 
     // Attach Metadata
-    req.params.originType = contentType;
-    req.params.originSize = rawBody.length;
+    req.opts.originType = contentType;
+    req.opts.originSize = rawBody.length;
 
     // Process or Bypass
     if (shouldCompress(req, rawBody)) {
