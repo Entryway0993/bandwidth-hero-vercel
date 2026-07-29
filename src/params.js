@@ -135,7 +135,7 @@ function params(req, res, next) {
       url,
       webp: !req.query.jpeg,
       grayscale: parseBoolean(req.query.bw, true),
-      quality: parseQuality(req.query.l, DEFAULT_QUALITY, MIN_QUALITY, MAX_QUALITY),
+      quality: parseQuality(req.query.l ?? req.query.q ?? req.query.quality, DEFAULT_QUALITY, MIN_QUALITY, MAX_QUALITY),
       maxWidth: clampInt(req.query.w, 0, 0, 4096),
     };
 
