@@ -46,7 +46,7 @@ async function compress(req, res, inputBuffer) {
   } else if (req.opts.webp) {
     res.setHeader('Content-Type', 'image/avif');
     instance
-      .avif({ quality, effort: 6 })
+      .avif({ quality, effort: 4 })
       .pipe(res);
   } else {
     res.setHeader('Content-Type', 'image/jpeg');
