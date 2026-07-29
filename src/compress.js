@@ -1,5 +1,4 @@
 import sharp from 'sharp';
-import isAnimated from 'is-animated';
 
 // Sharp global config for serverless (1024MB RAM)
 sharp.cache({ memory: 50, files: 0 });
@@ -12,15 +11,17 @@ sharp.simd(true);
  */
 async function compress(req, res, inputBuffer) {
   const { quality, grayscale, maxWidth } = req.opts;
-  const animated = isAnimated(inputBuffer);
 
-  // Get metadata from the actual buffer
+  // Get metadata (Sharp is the source of truth for animation)
   const metadata = await sharp(inputBuffer, {
     animated: true,
     limitInputPixels: 50_000_000,
   }).metadata();
 
-  // Build processing pipeline with buffer as input
+  // Sharp reports pages > 1 for animated images. No false positives.
+  const animated = (metadata.pages || 1) > 1;
+
+  // Build processing pipeline
   const instance = sharp(inputBuffer, {
     animated: true,
     limitInputPixels: 50_000_000,
