@@ -44,21 +44,20 @@ async function compress(req, res, inputBuffer) {
       .webp({ quality, effort: 4, smartSubsample: true, animated: true })
       .pipe(res);
   } else if (req.opts.webp) {
-    // Adaptive: huge images get lower effort or JPEG fallback
-    if (totalPixels > 20_000_000) {
-      // Extreme (800×25000+): JPEG — fast encode, no timeout
+    if (totalPixels > 30_000_000) {
+      // Extreme (30M+): JPEG — safety valve, never times out
       res.setHeader('Content-Type', 'image/jpeg');
       instance
         .jpeg({ quality, progressive: true, mozjpeg: true })
         .pipe(res);
-    } else if (totalPixels > 8_000_000) {
-      // Tall strip (800×10000+): AVIF effort 2 — still small, much faster
+    } else if (totalPixels > 3_000_000) {
+      // Tall strips (3M-30M): AVIF effort 2 — best compression, still fast
       res.setHeader('Content-Type', 'image/avif');
       instance
         .avif({ quality, effort: 2 })
         .pipe(res);
     } else {
-      // Normal page: AVIF effort 4 — best compression
+      // Normal pages (<3M): AVIF effort 4 — maximum compression
       res.setHeader('Content-Type', 'image/avif');
       instance
         .avif({ quality, effort: 4 })
