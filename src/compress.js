@@ -1,6 +1,5 @@
 import sharp from 'sharp';
 import isAnimated from 'is-animated';
-import { pipeline } from 'node:stream/promises';
 
 // Sharp global config for serverless (1024MB RAM)
 sharp.cache({ memory: 50, files: 0 });
@@ -9,13 +8,20 @@ sharp.simd(true);
 
 /**
  * Compresses an image buffer based on request params.
- * Streams output directly to response.
+ * Outputs directly to response.
  */
 async function compress(req, res, inputBuffer) {
   const { quality, grayscale, maxWidth } = req.params;
   const animated = isAnimated(inputBuffer);
 
-  const instance = sharp({
+  // Get metadata from the actual buffer
+  const metadata = await sharp(inputBuffer, {
+    animated: true,
+    limitInputPixels: 50_000_000,
+  }).metadata();
+
+  // Build processing pipeline with buffer as input
+  const instance = sharp(inputBuffer, {
     animated: true,
     limitInputPixels: 50_000_000,
   });
@@ -25,44 +31,28 @@ async function compress(req, res, inputBuffer) {
     instance.grayscale();
   }
 
-  // Get metadata for resize decision
-  const metadata = await instance.clone().metadata();
-
   // Opt-in resize: only when ?w= is passed and image is wider
   if (maxWidth > 0 && metadata.width > maxWidth) {
     instance.resize({ width: maxWidth, withoutEnlargement: true });
   }
 
-  // Format selection
+  // Format selection + stream to response
   if (animated) {
-    // Animated GIF/APNG/WebP → animated WebP
     res.setHeader('Content-Type', 'image/webp');
-    instance.webp({
-      quality,
-      effort: 4,
-      smartSubsample: true,
-      animated: true,
-    });
+    instance
+      .webp({ quality, effort: 4, smartSubsample: true, animated: true })
+      .pipe(res);
   } else if (req.params.webp) {
-    // Static → AVIF (best quality-per-byte at low q)
     res.setHeader('Content-Type', 'image/avif');
-    instance.avif({
-      quality,
-      effort: 6,
-    });
+    instance
+      .avif({ quality, effort: 6 })
+      .pipe(res);
   } else {
-    // Explicit ?jpeg → progressive JPEG
     res.setHeader('Content-Type', 'image/jpeg');
-    instance.jpeg({
-      quality,
-      progressive: true,
-      mozjpeg: true,
-    });
+    instance
+      .jpeg({ quality, progressive: true, mozjpeg: true })
+      .pipe(res);
   }
-
-  // Stream: input buffer → sharp → response
-  const { Readable } = await import('node:stream');
-  await pipeline(Readable.from(inputBuffer), instance, res);
 }
 
 export default compress;
