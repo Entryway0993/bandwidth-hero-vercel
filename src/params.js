@@ -85,9 +85,9 @@ function params(req, res, next) {
       return res.status(200).send('bandwidth-hero-proxy');
     }
 
-    if (Array.isArray(url)) {
-      console.warn('[Params] Multiple URLs provided; using the first.');
-      url = url[0];
+        if (Array.isArray(url)) {
+      // Take the last non-empty URL (Komikku sends empty first, real URL second)
+      url = url.filter(u => u && u.trim()).pop() || url[0];
     }
 
     // Fast precheck
