@@ -11,7 +11,7 @@ sharp.simd(true);
  * Outputs directly to response.
  */
 async function compress(req, res, inputBuffer) {
-  const { quality, grayscale, maxWidth } = req.params;
+  const { quality, grayscale, maxWidth } = req.opts;
   const animated = isAnimated(inputBuffer);
 
   // Get metadata from the actual buffer
@@ -42,7 +42,7 @@ async function compress(req, res, inputBuffer) {
     instance
       .webp({ quality, effort: 4, smartSubsample: true, animated: true })
       .pipe(res);
-  } else if (req.params.webp) {
+  } else if (req.opts.webp) {
     res.setHeader('Content-Type', 'image/avif');
     instance
       .avif({ quality, effort: 6 })
