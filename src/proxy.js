@@ -1,4 +1,5 @@
 import got from 'got';
+import { parseSafeUrl, safeLookup } from './urlGuard.js';
 import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
@@ -112,6 +113,7 @@ export default async function proxy(req, res) {
 
   const config = {
     headers,
+    dnsLookup: safeLookup,
     timeout: {
       request: 15000,
       response: 20000
@@ -122,6 +124,19 @@ export default async function proxy(req, res) {
     followRedirect: true,
     retry: {
       limit: 0
+    },
+    hooks: {
+  beforeRedirect: [
+    (options) => {
+      const redirectUrl = options?.url?.href || String(options?.url || '');
+
+      if (!parseSafeUrl(redirectUrl)) {
+        const error = new Error('SSRF_BLOCKED_REDIRECT');
+        error.code = 'SSRF_BLOCKED_REDIRECT';
+        throw error;
+      }
+    }
+  ]
     }
   };
 
@@ -169,25 +184,25 @@ export default async function proxy(req, res) {
 
     return bypass(req, res, rawBody, statusCode);
   } catch (error) {
-    if (
-      error.code === 'ERR_BODY_LARGE' ||
-      error.code === 'BODY_TOO_LARGE'
-    ) {
-      console.warn(`⚠️ File too large: ${targetUrl}`);
-      return res.status(413).send('File too large');
-    }
+  const code = error.code || error.cause?.code || '';
 
-    if (
-      error.code === 'ETIMEDOUT' ||
-      error.code === 'ERR_GOT_REQUEST_TIMEOUT'
-    ) {
-      return res.status(504).json({ error: 'Origin request timed out' });
-    }
-
-    console.error(
-      `❌ Proxy request failed: ${error.message} (${targetUrl})`
-    );
-
-    return res.status(502).json({ error: 'Proxy request failed' });
+  if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
+    return res.status(403).json({ error: 'Blocked by SSRF guard' });
   }
-      }
+
+  if (code === 'ERR_BODY_LARGE' || code === 'BODY_TOO_LARGE') {
+    console.warn(`⚠️ File too large: ${targetUrl}`);
+    return res.status(413).send('File too large');
+  }
+
+  if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
+    return res.status(504).json({ error: 'Origin request timed out' });
+  }
+
+  console.error(
+    `❌ Proxy request failed: ${error.message} (${targetUrl})`
+  );
+
+  return res.status(502).json({ error: 'Proxy request failed' });
+  }
+}
