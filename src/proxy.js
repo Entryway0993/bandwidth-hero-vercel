@@ -8,6 +8,13 @@ const CLOUDFLARE_STATUS_CODES = new Set([403, 503]);
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 3;
 
+function toBuffer(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (typeof value === 'string') return Buffer.from(value);
+  return Buffer.alloc(0);
+}
+
 function bypass(req, res, rawBody, statusCode = 200) {
   if (!res.headersSent) {
     res.status(statusCode);
@@ -97,15 +104,12 @@ async function fetchSafe(targetUrl, config) {
 
     const { statusCode, headers } = response;
 
-    if (
-      REDIRECT_STATUS_CODES.has(statusCode) &&
-      headers.location
-    ) {
-      currentUrl = new URL(
-        String(headers.location),
-        parsed.href
-      ).toString();
+    const location = Array.isArray(headers.location)
+      ? headers.location[0]
+      : headers.location;
 
+    if (REDIRECT_STATUS_CODES.has(statusCode) && location) {
+      currentUrl = new URL(String(location), parsed.href).toString();
       continue;
     }
 
@@ -131,21 +135,24 @@ export default async function proxy(req, res) {
     'user-agent': userAgent
   } = req.headers;
 
+  const headers = {
+    'user-agent':
+      userAgent ||
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/128 Safari/537.36',
+    accept:
+      req.headers.accept ||
+      'image/avif,image/webp,image/*;q=0.8,*/*;q=0.5',
+    'accept-encoding': 'gzip, deflate, br',
+    'accept-language':
+      req.headers['accept-language'] || 'en-US,en;q=0.9'
+  };
+
+  if (cookie) headers.cookie = cookie;
+  if (referer) headers.referer = referer;
+  if (authorization) headers.authorization = authorization;
+
   const config = {
-    headers: {
-      cookie,
-      referer,
-      authorization,
-      'user-agent':
-        userAgent ||
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/128 Safari/537.36',
-      accept:
-        req.headers.accept ||
-        'image/avif,image/webp,image/*;q=0.8,*/*;q=0.5',
-      'accept-encoding': 'gzip, deflate, br',
-      'accept-language':
-        req.headers['accept-language'] || 'en-US,en;q=0.9'
-    },
+    headers,
     timeout: {
       request: 15000,
       response: 20000
@@ -166,9 +173,7 @@ export default async function proxy(req, res) {
 
     const { statusCode, headers } = response;
 
-    const rawBody = Buffer.isBuffer(response.body)
-      ? response.body
-      : Buffer.from(response.body || '');
+    const rawBody = toBuffer(response.rawBody ?? response.body);
 
     if (CLOUDFLARE_STATUS_CODES.has(statusCode)) {
       return bypass(req, res, rawBody, statusCode);
@@ -208,6 +213,14 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
   } catch (error) {
     if (
+      error.code === 'SSRF_BLOCKED' ||
+      error.code === 'SSRF_BLOCKED_DNS' ||
+      String(error.message || '').includes('SSRF_BLOCKED_DNS')
+    ) {
+      return res.status(403).json({ error: 'Forbidden: internal address' });
+    }
+
+    if (
       error.code === 'ERR_BODY_LARGE' ||
       error.code === 'BODY_TOO_LARGE'
     ) {
@@ -216,10 +229,10 @@ export default async function proxy(req, res) {
     }
 
     if (
-      error.code === 'SSRF_BLOCKED' ||
-      error.code === 'SSRF_BLOCKED_DNS'
+      error.code === 'ETIMEDOUT' ||
+      error.code === 'ERR_GOT_REQUEST_TIMEOUT'
     ) {
-      return res.status(403).json({ error: 'Forbidden: internal address' });
+      return res.status(504).json({ error: 'Origin request timed out' });
     }
 
     console.error(
@@ -228,4 +241,4 @@ export default async function proxy(req, res) {
 
     return res.status(502).json({ error: 'Proxy request failed' });
   }
-      }
+  }
