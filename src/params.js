@@ -1,14 +1,9 @@
 import validator from 'validator';
 import { parseSafeUrl } from './urlGuard.js';
 
-const clampInt = (value, fallback, min, max) => {
-  const n = parseInt(value, 10);
-  return Number.isNaN(n) ? fallback : Math.min(Math.max(n, min), max);
-};
-
-const DEFAULT_QUALITY = clampInt(process.env.DEFAULT_QUALITY, 40, 10, 100);
-const MAX_QUALITY = clampInt(process.env.MAX_QUALITY, 100, 10, 100);
-const MIN_QUALITY = clampInt(process.env.MIN_QUALITY, 10, 1, 100);
+const DEFAULT_QUALITY = parseInt(process.env.DEFAULT_QUALITY, 10) || 40;
+const MAX_QUALITY = parseInt(process.env.MAX_QUALITY, 10) || 100;
+const MIN_QUALITY = parseInt(process.env.MIN_QUALITY, 10) || 10;
 
 function normalizeUrl(input) {
   if (typeof input !== 'string') return '';
@@ -97,9 +92,12 @@ function params(req, res, next) {
       });
     }
 
+    const forceJpeg =
+      'jpeg' in req.query && parseBoolean(req.query.jpeg, true);
+
     req.opts = {
       url: normalized,
-      webp: !req.query.jpeg,
+      webp: !forceJpeg,
       grayscale: parseBoolean(req.query.bw, true),
       quality: parseQuality(
         req.query.l ?? req.query.q ?? req.query.quality,
@@ -107,7 +105,7 @@ function params(req, res, next) {
         MIN_QUALITY,
         MAX_QUALITY
       ),
-      maxWidth: clampInt(req.query.w, 0, 0, 4096)
+      maxWidth: 0
     };
 
     return next();
