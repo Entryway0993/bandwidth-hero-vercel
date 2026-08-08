@@ -1,17 +1,12 @@
 {
   "version": 2,
-  "installCommand": "pnpm install",
+  "installCommand": "npm install",
   "builds": [
     {
       "src": "server.js",
       "use": "@vercel/node"
     }
   ],
-  "functions": {
-    "server.js": {
-      "maxDuration": 60
-    }
-  },
   "rewrites": [
     {
       "source": "/(.*)",
