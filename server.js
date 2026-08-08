@@ -1,12 +1,10 @@
+import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
 import authenticate from './src/authenticate.js';
 import params from './src/params.js';
 import proxy from './src/proxy.js';
-
-dotenv.config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
