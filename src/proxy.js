@@ -2,11 +2,8 @@ import got from 'got';
 import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
-import { parseSafeUrl, safeLookup } from './urlGuard.js';
 
 const CLOUDFLARE_STATUS_CODES = new Set([403, 503]);
-const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
-const MAX_REDIRECTS = 3;
 
 function toBuffer(value) {
   if (Buffer.isBuffer(value)) return value;
@@ -85,42 +82,6 @@ function detectContentType(buffer) {
   return 'application/octet-stream';
 }
 
-async function fetchSafe(targetUrl, config) {
-  let currentUrl = targetUrl;
-
-  for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const parsed = parseSafeUrl(currentUrl);
-
-    if (!parsed) {
-      const error = new Error('SSRF_BLOCKED');
-      error.code = 'SSRF_BLOCKED';
-      throw error;
-    }
-
-    const response = await got(parsed.href, {
-      ...config,
-      followRedirect: false
-    });
-
-    const { statusCode, headers } = response;
-
-    const location = Array.isArray(headers.location)
-      ? headers.location[0]
-      : headers.location;
-
-    if (REDIRECT_STATUS_CODES.has(statusCode) && location) {
-      currentUrl = new URL(String(location), parsed.href).toString();
-      continue;
-    }
-
-    return response;
-  }
-
-  const error = new Error('TOO_MANY_REDIRECTS');
-  error.code = 'TOO_MANY_REDIRECTS';
-  throw error;
-}
-
 export default async function proxy(req, res) {
   const targetUrl = req.opts.url;
 
@@ -160,16 +121,14 @@ export default async function proxy(req, res) {
     responseType: 'buffer',
     decompress: true,
     throwHttpErrors: false,
-    lookup: safeLookup,
-    http2: false,
-    followRedirect: false,
+    followRedirect: true,
     retry: {
       limit: 0
     }
   };
 
   try {
-    const response = await fetchSafe(targetUrl, config);
+    const response = await got(targetUrl, config);
 
     const { statusCode, headers } = response;
 
@@ -213,14 +172,6 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
   } catch (error) {
     if (
-      error.code === 'SSRF_BLOCKED' ||
-      error.code === 'SSRF_BLOCKED_DNS' ||
-      String(error.message || '').includes('SSRF_BLOCKED_DNS')
-    ) {
-      return res.status(403).json({ error: 'Forbidden: internal address' });
-    }
-
-    if (
       error.code === 'ERR_BODY_LARGE' ||
       error.code === 'BODY_TOO_LARGE'
     ) {
@@ -241,4 +192,4 @@ export default async function proxy(req, res) {
 
     return res.status(502).json({ error: 'Proxy request failed' });
   }
-    }
+      }
