@@ -241,4 +241,4 @@ export default async function proxy(req, res) {
 
     return res.status(502).json({ error: 'Proxy request failed' });
   }
-  }
+    }
