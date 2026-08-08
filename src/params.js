@@ -1,31 +1,41 @@
 import validator from 'validator';
 
-const DEFAULT_QUALITY = parseInt(process.env.DEFAULT_QUALITY, 10) || 40;
-const MAX_QUALITY = parseInt(process.env.MAX_QUALITY, 10) || 100;
-const MIN_QUALITY = parseInt(process.env.MIN_QUALITY, 10) || 10;
+const clampInt = (value, fallback, min, max) => {
+  const n = parseInt(value, 10);
+  return Number.isNaN(n) ? fallback : Math.min(Math.max(n, min), max);
+};
+
+const DEFAULT_QUALITY = clampInt(process.env.DEFAULT_QUALITY, 40, 10, 100);
+const MAX_QUALITY = clampInt(process.env.MAX_QUALITY, 100, 10, 100);
+const MIN_QUALITY = clampInt(process.env.MIN_QUALITY, 10, 1, 100);
 
 function normalizeUrl(input) {
   if (typeof input !== 'string') return '';
 
+  let decoded;
+  try {
+    decoded = decodeURIComponent(input);
+  } catch {
+    decoded = input;
+  }
+
   let url;
   try {
-    url = new URL(input);
+    url = new URL(decoded);
   } catch {
     return '';
   }
 
-  try {
-    url.pathname = url.pathname
-      .split('/')
-      .map(seg => {
-        try {
-          return encodeURIComponent(decodeURIComponent(seg));
-        } catch {
-          return seg;
-        }
-      })
-      .join('/');
-  } catch {}
+  url.pathname = url.pathname
+    .split('/')
+    .map(seg => {
+      try {
+        return encodeURIComponent(decodeURIComponent(seg));
+      } catch {
+        return seg;
+      }
+    })
+    .join('/');
 
   return url.href;
 }
@@ -69,35 +79,32 @@ function params(req, res, next) {
     }
 
     if (Array.isArray(url)) {
-      url =
-        url.filter(u => typeof u === 'string' && u.trim()).pop() || url[0];
+      url = url.filter(u => u && u.trim()).pop() || url[0];
     }
 
-    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+    if (!/^https?:\/\//i.test(url)) {
       return res.status(400).json({
         error: 'Invalid URL. Must include protocol (http or https).'
       });
     }
 
-    const normalized = normalizeUrl(url);
+    url = normalizeUrl(url);
 
-    if (!normalized || !isValidUrl(normalized)) {
-      console.error('[Params] Invalid URL:', normalized);
+    if (!isValidUrl(url)) {
+      console.error('[Params] Invalid URL:', url);
       return res.status(400).json({
         error: 'Invalid URL. Ensure it includes a valid protocol and domain.'
       });
     }
 
     try {
-      const hostname = new URL(normalized)
-        .hostname
-        .replace(/^\[|\]$/g, '')
-        .toLowerCase();
+      const hostname = new URL(url).hostname.toLowerCase();
 
       const blocked =
         hostname === 'localhost' ||
         hostname === '0.0.0.0' ||
         hostname === '::1' ||
+        hostname === '[::1]' ||
         hostname.endsWith('.local') ||
         hostname.endsWith('.internal') ||
         /^127\./.test(hostname) ||
@@ -115,12 +122,9 @@ function params(req, res, next) {
       return res.status(400).json({ error: 'Malformed URL after normalization' });
     }
 
-    const forceJpeg =
-      'jpeg' in req.query && parseBoolean(req.query.jpeg, true);
-
     req.opts = {
-      url: normalized,
-      webp: !forceJpeg,
+      url,
+      webp: !req.query.jpeg,
       grayscale: parseBoolean(req.query.bw, true),
       quality: parseQuality(
         req.query.l ?? req.query.q ?? req.query.quality,
@@ -136,9 +140,7 @@ function params(req, res, next) {
     console.error('[Params Middleware Error]', err);
 
     if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ error: 'Internal server error in params middleware.' });
+      res.status(500).json({ error: 'Internal server error in params middleware.' });
     }
   }
 }
