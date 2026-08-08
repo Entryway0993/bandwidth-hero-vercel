@@ -17,7 +17,6 @@ function bypass(req, res, rawBody, statusCode = 200) {
   if (!res.headersSent) {
     res.status(statusCode);
   }
-
   res.end(rawBody);
 }
 
@@ -91,10 +90,10 @@ export default async function proxy(req, res) {
   }
 
   const {
-  cookie,
-  referer,
-  'user-agent': userAgent
-} = req.headers;
+    cookie,
+    referer,
+    'user-agent': userAgent
+  } = req.headers;
 
   const headers = {
     'user-agent':
@@ -126,32 +125,39 @@ export default async function proxy(req, res) {
       limit: 0
     },
     hooks: {
-  beforeRedirect: [
-    (options) => {
-      const redirectUrl = options?.url?.href || String(options?.url || '');
+      beforeRedirect: [
+        (options) => {
+          const redirectUrl = options?.url?.href || String(options?.url || '');
 
-      if (!parseSafeUrl(redirectUrl)) {
-        const error = new Error('SSRF_BLOCKED_REDIRECT');
-        error.code = 'SSRF_BLOCKED_REDIRECT';
-        throw error;
-      }
-    }
-  ]
+          if (!parseSafeUrl(redirectUrl)) {
+            const error = new Error('SSRF_BLOCKED_REDIRECT');
+            error.code = 'SSRF_BLOCKED_REDIRECT';
+            throw error;
+          }
+        }
+      ]
     }
   };
 
   try {
     const response = await got(targetUrl, config);
 
-    const { statusCode, headers } = response;
+    // Renamed to responseHeaders to avoid shadowing the request headers
+    const { statusCode, headers: responseHeaders } = response;
 
     const rawBody = toBuffer(response.rawBody ?? response.body);
+
+    // Set security headers BEFORE the Cloudflare bypass so they are always applied
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('x-frame-options', 'DENY');
+    res.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
+    res.setHeader('x-proxy-cache', 'MISS');
 
     if (CLOUDFLARE_STATUS_CODES.has(statusCode)) {
       return bypass(req, res, rawBody, statusCode);
     }
 
-    let contentType = String(headers['content-type'] || '');
+    let contentType = String(responseHeaders['content-type'] || '');
 
     if (!contentType.trim().toLowerCase().startsWith('image/')) {
       const detected = detectContentType(rawBody);
@@ -161,22 +167,16 @@ export default async function proxy(req, res) {
       }
     }
 
-    delete headers['content-encoding'];
-    delete headers['content-length'];
+    delete responseHeaders['content-encoding'];
+    delete responseHeaders['content-length'];
 
-    copyHeaders({ headers, status: statusCode }, res);
+    copyHeaders({ headers: responseHeaders, status: statusCode }, res);
 
     if (contentType) {
       res.setHeader('Content-Type', contentType);
     }
 
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('x-frame-options', 'DENY');
-    res.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
-    res.setHeader('x-proxy-cache', 'MISS');
-
     req.opts.originType = contentType;
-    req.opts.originSize = rawBody.length;
 
     if (shouldCompress(req, rawBody)) {
       return compress(req, res, rawBody);
@@ -184,25 +184,23 @@ export default async function proxy(req, res) {
 
     return bypass(req, res, rawBody, statusCode);
   } catch (error) {
-  const code = error.code || error.cause?.code || '';
+    const code = error.code || error.cause?.code || '';
 
-  if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
-    return res.status(403).json({ error: 'Blocked by SSRF guard' });
-  }
+    if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
+      return res.status(403).json({ error: 'Blocked by SSRF guard' });
+    }
 
-  if (code === 'ERR_BODY_LARGE' || code === 'BODY_TOO_LARGE') {
-    console.warn(`⚠️ File too large: ${targetUrl}`);
-    return res.status(413).send('File too large');
-  }
+    if (code === 'ERR_BODY_LARGE' || code === 'BODY_TOO_LARGE') {
+      console.warn('⚠️ File too large'); // Removed targetUrl to prevent leaking tokens
+      return res.status(413).send('File too large');
+    }
 
-  if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
-    return res.status(504).json({ error: 'Origin request timed out' });
-  }
+    if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
+      return res.status(504).json({ error: 'Origin request timed out' });
+    }
 
-  console.error(
-    `❌ Proxy request failed: ${error.message} (${targetUrl})`
-  );
+    console.error(`❌ Proxy request failed: ${error.message}`); // Removed targetUrl
 
-  return res.status(502).json({ error: 'Proxy request failed' });
+    return res.status(502).json({ error: 'Proxy request failed' });
   }
 }
