@@ -90,11 +90,10 @@ export default async function proxy(req, res) {
   }
 
   const {
-    cookie,
-    referer,
-    authorization,
-    'user-agent': userAgent
-  } = req.headers;
+  cookie,
+  referer,
+  'user-agent': userAgent
+} = req.headers;
 
   const headers = {
     'user-agent':
@@ -110,7 +109,6 @@ export default async function proxy(req, res) {
 
   if (cookie) headers.cookie = cookie;
   if (referer) headers.referer = referer;
-  if (authorization) headers.authorization = authorization;
 
   const config = {
     headers,
