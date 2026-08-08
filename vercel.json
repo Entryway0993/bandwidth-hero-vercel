@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "name": "bandwidth-hero-proxy"
   "installCommand": "pnpm install",
   "builds": [
     {
@@ -13,10 +12,5 @@
       "source": "/(.*)",
       "destination": "/server.js"
     }
-  ],
-  "functions": {
-    "server.js": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }
