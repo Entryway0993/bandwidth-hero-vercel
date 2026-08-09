@@ -13,42 +13,35 @@ const MAX_CODEC_DIM = 16383;
  * Outputs directly to response.
  */
 async function compress(req, res, inputBuffer) {
-  const { quality, grayscale, maxWidth } = req.opts;
+  const { quality, grayscale } = req.opts;
 
-  // Get metadata (Sharp is the source of truth for animation)
-  const metadata = await sharp(inputBuffer, {
-    animated: true,
-    limitInputPixels: 50_000_000,
-  }).metadata();
+// Get metadata (Sharp is the source of truth for animation)
+const metadata = await sharp(inputBuffer, {
+  animated: true,
+  limitInputPixels: 50_000_000,
+}).metadata();
 
-  const animated = (metadata.pages || 1) > 1;
+const animated = (metadata.pages || 1) > 1;
 
-  // Effective output dimensions (after optional resize)
-  let outWidth = metadata.width || 0;
-  let outHeight = metadata.height || 0;
-  if (maxWidth > 0 && outWidth > maxWidth) {
-    const scale = maxWidth / outWidth;
-    outWidth = maxWidth;
-    outHeight = Math.round(outHeight * scale);
-  }
-  const maxDim = Math.max(outWidth, outHeight);
-  const totalPixels = outWidth * outHeight;
+// Effective output dimensions (No resizing. What you see is what you get.)
+const outWidth = metadata.width || 0;
+const outHeight = metadata.height || 0;
+const maxDim = Math.max(outWidth, outHeight);
+const totalPixels = outWidth * outHeight;
 
-  // Build processing pipeline
-  const instance = sharp(inputBuffer, {
-    animated: true,
-    limitInputPixels: 50_000_000,
-  });
+// Build processing pipeline
+const instance = sharp(inputBuffer, {
+  animated: true,
+  limitInputPixels: 50_000_000,
+});
 
-  // Grayscale (default on — perfect for B&W manga)
-  if (grayscale) {
-    instance.grayscale();
-  }
+// Grayscale (default on — perfect for B&W manga)
+if (grayscale) {
+  instance.grayscale();
+}
 
-  // Opt-in resize: only when ?w= is passed and image is wider
-  if (maxWidth > 0 && metadata.width > maxWidth) {
-    instance.resize({ width: maxWidth, withoutEnlargement: true });
-  }
+// 🛑 DEAD CODE PURGED: The resizing logic has been executed.
+
 
   // Catch encode errors so the function never hangs until timeout
   instance.on('error', (err) => {

@@ -56,24 +56,14 @@ export default function copyHeaders(source, target) {
     if (value === null || value === undefined) continue;
 
     try {
-      if (Array.isArray(value)) {
-        const cleanValues = value
-          .filter(v => v !== null && v !== undefined)
-          .map(String);
-
-        if (cleanValues.length > 0) {
-          target.setHeader(key, cleanValues);
-        }
-      } else {
-        target.setHeader(key, String(value));
-      }
-    } catch {
-      // ignore invalid upstream headers
-    }
-  }
-
-  try {
-    target.setHeader('Cache-Control', 'no-store');
+    // 🛑 PHASE 4 FIX: IMMUTABLE EDGE CACHING
+    // Cache for 1 year. Vercel Edge will serve this instantly for free.
+    target.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    
+    // CRITICAL: Isolate the cache by Auth headers.
+    // This forces the CDN to cache a separate version for every unique API Key.
+    // Without this, User B could get a cached private image requested by User A.
+    target.setHeader('Vary', 'Authorization, X-Api-Key');
   } catch {
     // ignore
   }

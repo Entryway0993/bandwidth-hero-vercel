@@ -63,17 +63,17 @@
       }
   
       req.opts = {
-        url: safeUrl.href,
-        webp: !parseBoolean(req.query.jpeg, false),
-        grayscale: parseBoolean(req.query.bw, true),
-        quality: parseQuality(
-          req.query.l ?? req.query.q ?? req.query.quality,
-          DEFAULT_QUALITY,
-          MIN_QUALITY,
-          MAX_QUALITY
-        ),
-        maxWidth: 0
-      };
+          url: safeUrl.href,
+          webp: !parseBoolean(req.query.jpeg, false),
+          grayscale: parseBoolean(req.query.bw, true),
+          quality: parseQuality(
+            req.query.l ?? req.query.q ?? req.query.quality,
+            DEFAULT_QUALITY,
+            MIN_QUALITY,
+            MAX_QUALITY
+          ),
+          maxWidth: 0 // Dead code confirmed. Kept at 0.
+        };
   
       return next();
     } catch (err) {
