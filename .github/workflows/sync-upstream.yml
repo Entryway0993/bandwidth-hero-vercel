@@ -1,0 +1,53 @@
+name: Sync upstream fork
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create upstream sync PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: https://github.com/hos1818/bandwidth-hero-vercel.git
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_REPO" || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch upstream
+
+          DEFAULT_BRANCH=$(git symbolic-ref --short HEAD)
+          BRANCH="upstream-sync-$(date +%Y%m%d-%H%M%S)"
+
+          if git show-ref --quiet refs/remotes/upstream/main; then
+            UPSTREAM_BRANCH=main
+          else
+            UPSTREAM_BRANCH=master
+          fi
+
+          git checkout -b "$BRANCH"
+          git merge "upstream/$UPSTREAM_BRANCH" --no-edit --allow-unrelated-histories
+
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$BRANCH" \
+            --title "Sync upstream changes" \
+            --body "Automatic sync from upstream. Review carefully because this repo has custom security fixes."
