@@ -16,10 +16,10 @@ jobs:
       - name: Sync fork with upstream
         uses: tgymnich/fork-sync@v2
         with:
-          owner: ayastreb
-          repo: bandwidth-hero-proxy
-          head: master # The upstream repo uses 'master'
+          owner: hos1818
+          repo: bandwidth-hero-vercel
+          head: main # Change to 'master' if the upstream repo uses master
           merge_method: merge
           pr_title: "Sync upstream changes"
-          pr_message: "Automatic sync from upstream. Review carefully because this repo has custom security fixes. Resolve any conflicts in the GitHub UI."
+          pr_message: "Automatic sync from hos1818/bandwidth-hero-vercel. Review carefully for security conflicts."
           auto_merge: false
