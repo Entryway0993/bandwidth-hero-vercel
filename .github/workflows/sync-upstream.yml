@@ -3,7 +3,7 @@ name: Sync upstream fork
 on:
   schedule:
     - cron: "0 6 * * 1" # Runs every Monday at 6 AM UTC
-  workflow_dispatch: # Allows you to click "Run workflow" manually
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,13 +13,44 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync fork with upstream
-        uses: tgymnich/fork-sync@v2
+      - name: Checkout Repository
+        uses: actions/checkout@v5 # Upgraded to v5 for Node 24 support
         with:
-          owner: hos1818
-          repo: bandwidth-hero-vercel
-          head: main # Change to 'master' if the upstream repo uses master
-          merge_method: merge
-          pr_title: "Sync upstream changes"
-          pr_message: "Automatic sync from hos1818/bandwidth-hero-vercel. Review carefully for security conflicts."
-          auto_merge: false
+          fetch-depth: 0
+
+      - name: Sync Fork with Upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Configure Git Bot Identity
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add upstream and fetch
+          git remote add upstream https://github.com/hos1818/bandwidth-hero-vercel.git 2>/dev/null || true
+          git fetch upstream
+          
+          # Check if there are actually any changes to sync (prevents empty PR crashes)
+          if git diff --quiet HEAD upstream/main; then
+            echo "✨ Already up to date. No sync needed."
+            exit 0
+          fi
+          
+          # Create a unique branch for this sync
+          SYNC_BRANCH="upstream-sync-$(date +%s)"
+          git checkout -b "$SYNC_BRANCH"
+          
+          # Attempt merge. If there are conflicts, --no-commit keeps them in the working tree
+          git merge upstream/main --no-edit --no-commit || true
+          
+          # Commit everything (including conflict markers) so you can fix them in the GitHub UI
+          git add .
+          git commit -m "Sync upstream changes" || true
+          git push origin "$SYNC_BRANCH" --force
+          
+          # Create the PR using the native Go-based gh CLI (Zero Node.js warnings)
+          gh pr create \
+            --title "Sync upstream changes" \
+            --body "Automatic sync from hos1818. Review carefully for security conflicts and resolve any merge markers in the GitHub UI." \
+            --base main \
+            --head "$SYNC_BRANCH"
