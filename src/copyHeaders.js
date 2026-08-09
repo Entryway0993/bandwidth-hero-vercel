@@ -67,4 +67,5 @@ export default function copyHeaders(source, target) {
   } catch {
     // ignore
   }
+ }
 }
