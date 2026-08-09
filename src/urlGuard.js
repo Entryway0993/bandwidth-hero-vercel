@@ -45,6 +45,7 @@ export function parseSafeUrl(input) {
   }
 
   let url;
+
   try {
     url = new URL(raw);
   } catch {
@@ -54,10 +55,9 @@ export function parseSafeUrl(input) {
   if (!ALLOWED_PROTOCOLS.has(url.protocol)) return null;
   if (url.username || url.password) return null;
 
-  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const host = url.hostname.replace(/^[|]$/g, '').toLowerCase();
 
   if (!host) return null;
-
   if (BLOCKED_HOSTS.has(host)) return null;
 
   if (BLOCKED_SUFFIXES.some(suffix => host.endsWith(suffix))) {
@@ -77,6 +77,8 @@ export function safeLookup(hostname, options, callback) {
     options = {};
   }
 
+  const wantsAll = Boolean(options?.all);
+
   const lookupOptions = {
     all: true,
     verbatim: false
@@ -89,8 +91,8 @@ export function safeLookup(hostname, options, callback) {
   dns.lookup(hostname, lookupOptions, (err, addresses) => {
     if (err) return callback(err);
 
-    const publicAddresses = (addresses || []).filter(entry =>
-      isPublicIP(entry.address)
+    const publicAddresses = (addresses || []).filter(
+      entry => entry && entry.address && isPublicIP(entry.address)
     );
 
     if (!publicAddresses.length) {
@@ -99,9 +101,16 @@ export function safeLookup(hostname, options, callback) {
       return callback(error);
     }
 
-    const chosen =
-      publicAddresses.find(entry => entry.family === 4) ||
-      publicAddresses[0];
+    publicAddresses.sort((a, b) => {
+      if (a.family === b.family) return 0;
+      return a.family === 4 ? -1 : 1;
+    });
+
+    if (wantsAll) {
+      return callback(null, publicAddresses);
+    }
+
+    const chosen = publicAddresses[0];
 
     callback(null, chosen.address, chosen.family);
   });
