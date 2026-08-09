@@ -13,44 +13,39 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v5 # Upgraded to v5 for Node 24 support
+      - name: Checkout repository
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Sync Fork with Upstream
+      - name: Sync fork with upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Configure Git Bot Identity
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add upstream and fetch
           git remote add upstream https://github.com/hos1818/bandwidth-hero-vercel.git 2>/dev/null || true
           git fetch upstream
           
-          # Check if there are actually any changes to sync (prevents empty PR crashes)
-          if git diff --quiet HEAD upstream/main; then
-            echo "✨ Already up to date. No sync needed."
+          # Check if upstream/main is already an ancestor of our HEAD
+          # (Meaning: We already have all their code, they just haven't updated in 3 months)
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "✅ Already up to date. Upstream has no new changes."
             exit 0
           fi
           
-          # Create a unique branch for this sync
+          # If upstream actually has NEW commits, create a sync branch
           SYNC_BRANCH="upstream-sync-$(date +%s)"
           git checkout -b "$SYNC_BRANCH"
           
-          # Attempt merge. If there are conflicts, --no-commit keeps them in the working tree
-          git merge upstream/main --no-edit --no-commit || true
+          # Merge, allowing unrelated histories since you heavily modified the code
+          git merge upstream/main --no-edit --allow-unrelated-histories || true
+          git push origin "$SYNC_BRANCH"
           
-          # Commit everything (including conflict markers) so you can fix them in the GitHub UI
-          git add .
-          git commit -m "Sync upstream changes" || true
-          git push origin "$SYNC_BRANCH" --force
-          
-          # Create the PR using the native Go-based gh CLI (Zero Node.js warnings)
+          # Open a PR so you can review their new code before it touches your security armor
           gh pr create \
             --title "Sync upstream changes" \
-            --body "Automatic sync from hos1818. Review carefully for security conflicts and resolve any merge markers in the GitHub UI." \
+            --body "Upstream finally woke up. Review carefully for security conflicts before merging." \
             --base main \
-            --head "$SYNC_BRANCH"
+            --head "$SYNC_BRANCH" || true
