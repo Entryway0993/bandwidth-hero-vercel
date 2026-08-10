@@ -152,18 +152,6 @@ export default async function proxy(req, res) {
       limit: 0
     },
     hooks: {
-      // 🛑 PHASE 2 FIX: DEFUSE THE RAM BOMB
-      beforeResponse: [
-        (response) => {
-          const contentLength = parseInt(response.headers['content-length'], 10);
-          // 20MB limit. If the file is bigger than this, we abort before it hits RAM.
-          if (contentLength > 20 * 1024 * 1024) {
-            const error = new Error('BODY_TOO_LARGE');
-            error.code = 'BODY_TOO_LARGE';
-            throw error;
-          }
-        }
-      ],
       beforeRedirect: [
         (options) => {
           const redirectUrl = options?.url?.href || String(options?.url || '');
@@ -179,7 +167,18 @@ export default async function proxy(req, res) {
   };
 
   try {
-    const response = await got(targetUrl, config);
+    const request = got(targetUrl, config);
+
+    // 🛑 SURGICAL FIX: DEFUSE THE RAM BOMB (got v14 compatible)
+    // Watches the download in real-time. If it exceeds 20MB, kill the connection instantly.
+    request.on('downloadProgress', (progress) => {
+      const size = progress.total > 0 ? progress.total : progress.transferred;
+      if (size > 20 * 1024 * 1024) {
+        request.destroy(new Error('BODY_TOO_LARGE'));
+      }
+    });
+
+    const response = await request;
 
     const { statusCode, headers: responseHeaders } = response;
 
