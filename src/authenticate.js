@@ -29,11 +29,8 @@ export default function authenticate(req, res, next) {
     });
   }
   
-  // Check Header API Key (Secure, won't be logged in URLs)
-  const headerKey = req.headers['x-api-key'];
-  if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
-    return next();
-  }
+    
+
   
   // Check Basic Auth (Only if credentials are actually configured)
   if (LOGIN && PASSWORD) {
