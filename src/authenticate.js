@@ -30,14 +30,22 @@ export default function authenticate(req, res, next) {
     return next();
   }
   
-  // 2. Check Query String API Key (The Insecure Lobotomy for your phone app)
+// 2. Check Query String API Key (The Insecure Lobotomy)
   let queryKey = req.query.api || req.query.apikey || req.query.api_key;
   
-  // 🛑 SURGICAL FIX: Strip trailing slashes added by dumb app auto-tags
+  // 🛑 SURGICAL FIX v3: Strip slashes AND url-encoded slashes (%2F)
   if (typeof queryKey === 'string') {
-    queryKey = queryKey.trim().replace(/\/$/, '');
+    queryKey = queryKey.trim().replace(/(\/|%2F)$/i, '');
   }
   
+  // 🔍 WIRETAP: Log exactly what the server sees
+  console.log('🚨 DEBUG AUTH:', { 
+    incoming: queryKey, 
+    envVarExists: !!API_KEY, 
+    expectedLength: API_KEY ? API_KEY.length : 0,
+    match: queryKey === API_KEY
+  });
+
   if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
     return next();
   }
