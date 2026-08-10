@@ -30,22 +30,15 @@ export default function authenticate(req, res, next) {
     return next();
   }
   
-// 2. Check Query String API Key (The Insecure Lobotomy)
+// 2. Check Query String API Key (The Nuclear Lobotomy)
   let queryKey = req.query.api || req.query.apikey || req.query.api_key;
   
-  // 🛑 SURGICAL FIX v3: Strip slashes AND url-encoded slashes (%2F)
+  // 🛑 NUCLEAR FIX: Chop off ANY garbage the dumb app attaches.
+  // If it sends "KEY/?jpg=0", this splits it at the "/" or "?" and keeps ONLY "KEY".
   if (typeof queryKey === 'string') {
-    queryKey = queryKey.trim().replace(/(\/|%2F)$/i, '');
+    queryKey = queryKey.split(/[\/\?]/)[0].trim();
   }
   
-  // 🔍 WIRETAP: Log exactly what the server sees
-  console.log('🚨 DEBUG AUTH:', { 
-    incoming: queryKey, 
-    envVarExists: !!API_KEY, 
-    expectedLength: API_KEY ? API_KEY.length : 0,
-    match: queryKey === API_KEY
-  });
-
   if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
     return next();
   }
