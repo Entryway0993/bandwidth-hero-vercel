@@ -16,10 +16,9 @@ async function compress(req, res, inputBuffer) {
   const { quality, grayscale } = req.opts;
   
   // 🛑 SURGICAL FIX: Single instantiation to prevent double CPU parsing.
-  // 🛑 SURGICAL FIX: Lowered limitInputPixels to 20MP (~80MB RAM) to prevent serverless OOM DoS.
   const instance = sharp(inputBuffer, {
     animated: true,
-    limitInputPixels: 20_000_000,
+    limitInputPixels: 40_000_000, // 40MP: Safe ceiling for massive Manhwa strips
   });
   
   // Get metadata (Sharp is the source of truth for animation)
