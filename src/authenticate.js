@@ -31,7 +31,13 @@ export default function authenticate(req, res, next) {
   }
   
   // 2. Check Query String API Key (The Insecure Lobotomy for your phone app)
-  const queryKey = req.query.api || req.query.apikey || req.query.api_key;
+  let queryKey = req.query.api || req.query.apikey || req.query.api_key;
+  
+  // 🛑 SURGICAL FIX: Strip trailing slashes added by dumb app auto-tags
+  if (typeof queryKey === 'string') {
+    queryKey = queryKey.trim().replace(/\/$/, '');
+  }
+  
   if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
     return next();
   }
