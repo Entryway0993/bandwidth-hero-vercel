@@ -14,42 +14,39 @@ const MAX_CODEC_DIM = 16383;
  */
 async function compress(req, res, inputBuffer) {
   const { quality, grayscale } = req.opts;
-
-// Get metadata (Sharp is the source of truth for animation)
-const metadata = await sharp(inputBuffer, {
-  animated: true,
-  limitInputPixels: 50_000_000,
-}).metadata();
-
-const animated = (metadata.pages || 1) > 1;
-
-// Effective output dimensions (No resizing. What you see is what you get.)
-const outWidth = metadata.width || 0;
-const outHeight = metadata.height || 0;
-const maxDim = Math.max(outWidth, outHeight);
-const totalPixels = outWidth * outHeight;
-
-// Build processing pipeline
-const instance = sharp(inputBuffer, {
-  animated: true,
-  limitInputPixels: 50_000_000,
-});
-
-// Grayscale (default on — perfect for B&W manga)
-if (grayscale) {
-  instance.grayscale();
-}
-
-// 🛑 DEAD CODE PURGED: The resizing logic has been executed.
-
-
+  
+  // 🛑 SURGICAL FIX: Single instantiation to prevent double CPU parsing.
+  // 🛑 SURGICAL FIX: Lowered limitInputPixels to 20MP (~80MB RAM) to prevent serverless OOM DoS.
+  const instance = sharp(inputBuffer, {
+    animated: true,
+    limitInputPixels: 20_000_000,
+  });
+  
+  // Get metadata (Sharp is the source of truth for animation)
+  const metadata = await instance.metadata();
+  
+  const animated = (metadata.pages || 1) > 1;
+  
+  // Effective output dimensions (No resizing. What you see is what you get.)
+  const outWidth = metadata.width || 0;
+  const outHeight = metadata.height || 0;
+  const maxDim = Math.max(outWidth, outHeight);
+  const totalPixels = outWidth * outHeight;
+  
+  // Grayscale (default on — perfect for B&W manga)
+  if (grayscale) {
+    instance.grayscale();
+  }
+  
+  // 🛑 DEAD CODE PURGED: The resizing logic has been executed.
+  
   // Catch encode errors so the function never hangs until timeout
   instance.on('error', (err) => {
     console.error('❌ Sharp encode error:', err.message);
     if (!res.headersSent) res.status(500).end();
     else res.end();
   });
-
+  
   // Format selection + stream to response
   if (animated) {
     res.setHeader('Content-Type', 'image/webp');

@@ -8,7 +8,13 @@ function safeCompare(a, b) {
   const bufferA = Buffer.from(a);
   const bufferB = Buffer.from(b);
   
-  if (bufferA.length !== bufferB.length) return false;
+  if (bufferA.length !== bufferB.length) {
+    // 🛑 SURGICAL FIX: Blind the timing side-channel.
+    // Force a constant-time operation proportional to the INPUT length (bufferB)
+    // so the execution time reveals absolutely nothing about the SECRET length (bufferA).
+    crypto.timingSafeEqual(bufferB, bufferB);
+    return false;
+  }
   
   return crypto.timingSafeEqual(bufferA, bufferB);
 }
@@ -18,8 +24,8 @@ export default function authenticate(req, res, next) {
   // If absolutely no auth is configured, the server is broken. Refuse to serve.
   if (!LOGIN && !PASSWORD && !API_KEY) {
     console.error('🚨 CRITICAL: No authentication configured. Refusing to serve.');
-    return res.status(500).json({ 
-      error: 'Server misconfigured: Authentication is required.' 
+    return res.status(500).json({
+      error: 'Server misconfigured: Authentication is required.'
     });
   }
   

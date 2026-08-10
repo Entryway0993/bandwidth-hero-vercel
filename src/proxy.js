@@ -217,7 +217,9 @@ export default async function proxy(req, res) {
     req.opts.originType = contentType;
 
     if (shouldCompress(req, rawBody)) {
-      return compress(req, res, rawBody);
+      // 🛑 SURGICAL FIX: Await the async function to catch Sharp rejections
+      await compress(req, res, rawBody);
+      return;
     }
 
     return bypass(req, res, rawBody, statusCode);
@@ -225,6 +227,9 @@ export default async function proxy(req, res) {
     // 🛑 LOG SANITIZER: Strip potential tokens from error messages
     const safeMessage = error.message?.replace(/https?:\/\/[^\s]+/g, '[REDACTED_URL]') || 'Unknown error';
     console.error(`❌ Proxy request failed: ${safeMessage}`);
+
+    // 🛑 SURGICAL FIX: Materialize the phantom variable
+    const code = error.code;
 
     if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
       return res.status(403).json({ error: 'Blocked by SSRF guard' });

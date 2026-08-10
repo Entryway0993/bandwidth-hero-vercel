@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
+        # 🛑 SURGICAL FIX: Reverted to v5 to match current 2026 Node.js runner environments.
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -39,8 +40,14 @@ jobs:
           SYNC_BRANCH="upstream-sync-$(date +%s)"
           git checkout -b "$SYNC_BRANCH"
           
-          # Merge, allowing unrelated histories since you heavily modified the code
-          git merge upstream/main --no-edit --allow-unrelated-histories || true
+          # 🛑 SURGICAL FIX: Stop swallowing merge conflicts. 
+          # If merge fails, abort the dirty tree and fail the CI pipeline loudly.
+          if ! git merge upstream/main --no-edit --allow-unrelated-histories; then
+            echo "❌ Merge conflict detected. Aborting sync to prevent silent failures."
+            git merge --abort
+            exit 1
+          fi
+          
           git push origin "$SYNC_BRANCH"
           
           # Open a PR so you can review their new code before it touches your security armor
