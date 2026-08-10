@@ -32,4 +32,4 @@ ENVIRONMENT_VARIABLES
 
 ![image](https://github.com/user-attachments/assets/347cdf4c-b42b-4ad4-839f-8fd3aa63ef10)
 
-because the the conversion to avif takes more time than the default value of Function Max Duration of vercel
+because the the conversion to avif takes more time than the default value of Function Max Duration of vercel 
