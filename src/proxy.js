@@ -51,6 +51,7 @@ function detectContentType(buffer) {
 export default async function proxy(req, res) {
   let targetUrl = req.opts?.url || req.query?.url;
 
+  // 🛑 TITANIUM SHIELD: Force garbage into a single, valid string
   if (Array.isArray(targetUrl)) {
     targetUrl = targetUrl.find(u => u && typeof u === 'string') || String(targetUrl[0]);
   }
@@ -66,8 +67,6 @@ export default async function proxy(req, res) {
   } catch {
     return res.status(400).json({ error: 'Malformed URL' });
   }
-
-  console.log('🚨 INCOMING URL:', targetUrl);
 
   const { cookie, 'user-agent': userAgent } = req.headers;
 
@@ -85,6 +84,7 @@ export default async function proxy(req, res) {
   };
 
   if (cookie) headers.cookie = cookie;
+  // 🛑 SURGICAL FIX: Referer header dropped to prevent got() crashes on malformed referers
 
   const config = {
     headers,
@@ -100,7 +100,6 @@ export default async function proxy(req, res) {
       beforeRedirect: [
         (options) => {
           const redirectUrl = options?.url?.href || String(options?.url || '');
-          console.log('🔀 REDIRECT INTERCEPTED:', redirectUrl);
           if (!parseSafeUrl(redirectUrl)) {
             const error = new Error('SSRF_BLOCKED_REDIRECT');
             error.code = 'SSRF_BLOCKED_REDIRECT';
@@ -112,21 +111,11 @@ export default async function proxy(req, res) {
   };
 
   try {
-    // 🛑 CLOUDFLARE RELAY: Route traffic through your Worker
+    // 🛑 CLOUDFLARE RELAY (Bulletproofed)
     let workerBase = process.env.CF_WORKER_URL || '';
-    
-    // Clean up garbage values
     if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
-    
-    // Force https if they forgot the protocol
-    if (workerBase && !workerBase.startsWith('http')) {
-      workerBase = 'https://' + workerBase;
-    }
-    
-    // Remove trailing slashes to prevent double-slash errors
-    if (workerBase.endsWith('/')) {
-      workerBase = workerBase.slice(0, -1);
-    }
+    if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
+    if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
 
     let fetchUrl = targetUrl;
     let fetchConfig = config;
@@ -143,14 +132,11 @@ export default async function proxy(req, res) {
         followRedirect: true,
         retry: { limit: 0 }
       };
-      console.log('🔀 ROUTING THROUGH WORKER:', fetchUrl);
-    } else {
-      console.log('⚠️ WORKER URL MISSING OR MALFORMED. FALLING BACK TO DIRECT FETCH.');
     }
 
     const request = got(fetchUrl, fetchConfig);
 
-    // 🛑 SURGICAL FIX: DEFUSE THE RAM BOMB
+    // 🛑 RAM BOMB DEFUSAL: Kill connections over 20MB instantly
     request.on('downloadProgress', (progress) => {
       const size = progress.total > 0 ? progress.total : progress.transferred;
       if (size > 20 * 1024 * 1024) {
@@ -199,13 +185,10 @@ export default async function proxy(req, res) {
     const isMalformed = error.message === 'Invalid URL';
     
     if ((isBlocked || isMalformed) && !req.opts.retried) {
-      console.warn(`⚠️ Direct access failed (${isBlocked ? '403' : 'Invalid URL'}). Rerouting through Parasite...`);
       req.opts.retried = true; 
       req.opts.url = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
       return proxy(req, res); 
     }
-
-    console.error('🚨 FULL ERROR STACK:', error.stack || error.message);
 
     const code = error.code;
 
@@ -214,7 +197,6 @@ export default async function proxy(req, res) {
     }
 
     if (code === 'ERR_BODY_LARGE' || code === 'BODY_TOO_LARGE') {
-      console.warn('⚠️ File too large');
       return res.status(413).send('File too large');
     }
 
@@ -222,7 +204,6 @@ export default async function proxy(req, res) {
       return res.status(504).json({ error: 'Origin request timed out' });
     }
 
-    console.error(`❌ Proxy request failed: ${error.message}`);
     return res.status(502).json({ error: 'Proxy request failed' });
   }
-      }
+    }
