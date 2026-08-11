@@ -1,7 +1,28 @@
-import auth from 'basic-auth';
 import crypto from 'crypto';
 
 const { LOGIN, PASSWORD, API_KEY } = process.env;
+
+// 🛑 SURGICAL FIX: Native Basic Auth Parser (Zero Dependencies)
+// Replaces the broken 'basic-auth' npm package to prevent ESM/CJS crashes.
+function parseBasicAuth(req) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Basic ')) return undefined;
+  
+  try {
+    // Decode the Base64 string after "Basic "
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const colonIndex = decoded.indexOf(':');
+    
+    if (colonIndex === -1) return undefined;
+    
+    return {
+      name: decoded.slice(0, colonIndex),
+      pass: decoded.slice(colonIndex + 1)
+    };
+  } catch {
+    return undefined; // Invalid Base64
+  }
+}
 
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -30,11 +51,10 @@ export default function authenticate(req, res, next) {
     return next();
   }
   
-// 2. Check Query String API Key (The Nuclear Lobotomy)
+  // 2. Check Query String API Key (The Nuclear Lobotomy for your phone app)
   let queryKey = req.query.api || req.query.apikey || req.query.api_key;
   
-  // 🛑 NUCLEAR FIX: Chop off ANY garbage the dumb app attaches.
-  // If it sends "KEY/?jpg=0", this splits it at the "/" or "?" and keeps ONLY "KEY".
+  // 🛑 SURGICAL FIX: Chop off ANY garbage the dumb app attaches.
   if (typeof queryKey === 'string') {
     queryKey = queryKey.split(/[\/\?]/)[0].trim();
   }
@@ -43,9 +63,9 @@ export default function authenticate(req, res, next) {
     return next();
   }
   
-  // 3. Check Basic Auth
+  // 3. Check Basic Auth (Using our native parser)
   if (LOGIN && PASSWORD) {
-    const credentials = auth(req);
+    const credentials = parseBasicAuth(req);
     if (
       credentials &&
       safeCompare(credentials.name, LOGIN) &&
