@@ -61,27 +61,28 @@ function detectContentType(buffer) {
 export default async function proxy(req, res) {
   let targetUrl = req.opts?.url || req.query?.url;
 
-  // 🛑 TITANIUM SHIELD: Force garbage into a single, valid string
   if (Array.isArray(targetUrl)) {
     targetUrl = targetUrl.find(u => u && typeof u === 'string') || String(targetUrl[0]);
-  }
-  if (typeof targetUrl === 'object' && targetUrl !== null) {
-    targetUrl = String(targetUrl);
   }
   if (!targetUrl || typeof targetUrl !== 'string') {
     return res.status(400).json({ error: 'Missing URL parameter' });
   }
 
-  // 🛑 SURGICAL FIX: Clean whitespace and force protocol
   targetUrl = targetUrl.trim();
   if (!targetUrl.startsWith('http')) {
     targetUrl = 'https://' + targetUrl;
   }
 
-  // 🔍 WIRETAP: Log the exact URL so we can see what the app is sending if it crashes again
+  // 🛑 FORCE CLEAN URL: Strip any hidden zero-width ghost characters
+  try {
+    targetUrl = new URL(targetUrl).href;
+  } catch {
+    return res.status(400).json({ error: 'Malformed URL' });
+  }
+
   console.log('🚨 INCOMING URL:', targetUrl);
 
-  const { cookie, referer, 'user-agent': userAgent } = req.headers;
+  const { cookie, 'user-agent': userAgent } = req.headers;
 
   const headers = {
     'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.113 Safari/537.36',
@@ -97,7 +98,8 @@ export default async function proxy(req, res) {
   };
 
   if (cookie) headers.cookie = cookie;
-  if (referer) headers.referer = referer;
+  // 🛑 SURGICAL FIX: Drop the Referer header entirely. 
+  // If the app sends a malformed referer, got will crash with "Invalid URL" before the request even starts.
 
   const config = {
     headers,
@@ -185,8 +187,8 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    const safeMessage = error.message?.replace(/https?:\/\/[^\s]+/g, '[REDACTED_URL]') || 'Unknown error';
-    console.error(`❌ Proxy request failed: ${safeMessage}`);
+    // 🚨 STACK TRACE WIRETAP: Log the exact file and line number that is crashing
+    console.error('🚨 FULL ERROR STACK:', error.stack || error.message);
 
     const code = error.code;
 
