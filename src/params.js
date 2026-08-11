@@ -34,6 +34,16 @@ function params(req, res, next) {
   try {
     let { url } = req.query;
     
+    // 🛑 SURGICAL FIX: If the dumb app swallowed the URL into the API key
+    // e.g., ?api=SECRET/?url=https://...
+    if (!url && req.query.api) {
+      const apiGarbage = String(req.query.api);
+      const urlMatch = apiGarbage.match(/[?&]url=([^&]+)/);
+      if (urlMatch) {
+        url = decodeURIComponent(urlMatch[1]);
+      }
+    }
+
     if (!url) {
       return res.status(200).send('bandwidth-hero-proxy');
     }
