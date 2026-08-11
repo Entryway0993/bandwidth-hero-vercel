@@ -9,7 +9,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "basic-auth": "^2.0.1",
+    "basic-auth": "^3.0.0",
     "dotenv": "^17.2.2",
     "express": "^4.21.2",
     "got": "^15.1.0",
