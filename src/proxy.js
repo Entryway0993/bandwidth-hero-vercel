@@ -30,31 +30,21 @@ function toBuffer(value) {
 }
 
 function bypass(req, res, rawBody, statusCode = 200) {
-  if (!res.headersSent) {
-    res.status(statusCode);
-  }
+  if (!res.headersSent) res.status(statusCode);
   res.end(rawBody);
 }
 
 function detectContentType(buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length < 2) {
-    return 'application/octet-stream';
-  }
-
+  if (!Buffer.isBuffer(buffer) || buffer.length < 2) return 'application/octet-stream';
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
   if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
   if (buffer.length >= 4 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
   if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
-
-  if (buffer.length >= 12 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 && buffer.subarray(8, 12).toString('ascii') === 'WEBP') {
-    return 'image/webp';
-  }
-
+  if (buffer.length >= 12 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
   if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = buffer.subarray(8, 12).toString('ascii');
     if (brand === 'avif' || brand === 'avis') return 'image/avif';
   }
-
   return 'application/octet-stream';
 }
 
@@ -69,11 +59,8 @@ export default async function proxy(req, res) {
   }
 
   targetUrl = targetUrl.trim();
-  if (!targetUrl.startsWith('http')) {
-    targetUrl = 'https://' + targetUrl;
-  }
+  if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
 
-  // 🛑 FORCE CLEAN URL: Strip any hidden zero-width ghost characters
   try {
     targetUrl = new URL(targetUrl).href;
   } catch {
@@ -98,8 +85,6 @@ export default async function proxy(req, res) {
   };
 
   if (cookie) headers.cookie = cookie;
-  // 🛑 SURGICAL FIX: Drop the Referer header entirely. 
-  // If the app sends a malformed referer, got will crash with "Invalid URL" before the request even starts.
 
   const config = {
     headers,
@@ -115,6 +100,7 @@ export default async function proxy(req, res) {
       beforeRedirect: [
         (options) => {
           const redirectUrl = options?.url?.href || String(options?.url || '');
+          console.log('🔀 REDIRECT INTERCEPTED:', redirectUrl);
           if (!parseSafeUrl(redirectUrl)) {
             const error = new Error('SSRF_BLOCKED_REDIRECT');
             error.code = 'SSRF_BLOCKED_REDIRECT';
@@ -125,10 +111,12 @@ export default async function proxy(req, res) {
     }
   };
 
-  // 🛑 SURGICAL FIX: Removed the nested/unclosed try block.
   try {
     // 🛑 CLOUDFLARE RELAY: Route traffic through your Worker
     const WORKER_URL = process.env.CF_WORKER_URL || 'https://your-worker-name.your-username.workers.dev';
+    
+    // 🛑 CRITICAL FIX: If you haven't set CF_WORKER_URL in Vercel env vars, 
+    // you MUST replace the placeholder below with your ACTUAL worker URL.
     const workerTarget = `${WORKER_URL}/?url=${encodeURIComponent(targetUrl)}`;
 
     const simpleConfig = {
@@ -187,7 +175,17 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    // 🚨 STACK TRACE WIRETAP: Log the exact file and line number that is crashing
+    // 🛑 THE PARASITE CATCH-ALL: Handles 403s AND malformed redirects (Invalid URL)
+    const isBlocked = error.response && error.response.statusCode === 403;
+    const isMalformed = error.message === 'Invalid URL';
+    
+    if ((isBlocked || isMalformed) && !req.opts.retried) {
+      console.warn(`⚠️ Direct access failed (${isBlocked ? '403' : 'Invalid URL'}). Rerouting through Parasite...`);
+      req.opts.retried = true; 
+      req.opts.url = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+      return proxy(req, res); 
+    }
+
     console.error('🚨 FULL ERROR STACK:', error.stack || error.message);
 
     const code = error.code;
