@@ -1,11 +1,9 @@
 import sharp from 'sharp';
 
-// Sharp global config for serverless (1024MB RAM)
 sharp.cache({ memory: 50, files: 0 });
 sharp.concurrency(1);
 sharp.simd(true);
 
-// AVIF and WebP both cap at 16383px per dimension. JPEG handles up to 65535.
 const MAX_CODEC_DIM = 16383;
 
 async function compress(req, res, inputBuffer) {
@@ -13,7 +11,7 @@ async function compress(req, res, inputBuffer) {
   
   const instance = sharp(inputBuffer, {
     animated: true,
-    limitInputPixels: 40_000_000, // 40MP: Safe ceiling for massive Manhwa strips
+    limitInputPixels: 40_000_000,
   });
   
   const metadata = await instance.metadata();
@@ -33,30 +31,24 @@ async function compress(req, res, inputBuffer) {
     else res.end();
   });
   
-  // 🛑 THE CODEC TUNING: Maximum compression effort + 4:2:0 subsampling
   if (animated) {
+    // Animation: WebP is the only animated codec Sharp supports
     res.setHeader('Content-Type', 'image/webp');
     instance
-      .webp({ quality, effort: 6, smartSubsample: true, animated: true })
+      .webp({ quality, effort: 4, smartSubsample: true, animated: true })
       .pipe(res);
   } else if (req.opts.webp) {
     if (maxDim > MAX_CODEC_DIM || totalPixels > 30_000_000) {
-      // Massive images -> JPEG (Mozjpeg + 4:2:0 subsampling)
+      // Too tall/large for AVIF — JPEG is the only codec that fits
       res.setHeader('Content-Type', 'image/jpeg');
       instance
         .jpeg({ quality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' })
         .pipe(res);
-    } else if (totalPixels > 3_000_000) {
-      // Tall strips -> AVIF Effort 5 (Balances CPU time vs Size)
-      res.setHeader('Content-Type', 'image/avif');
-      instance
-        .avif({ quality, effort: 5, chromaSubsampling: '4:2:0' })
-        .pipe(res);
     } else {
-      // Normal pages -> AVIF Effort 6 (Maximum compression)
+      // 🛑 COMPRESSION KING: AVIF effort 4 for everything that fits
       res.setHeader('Content-Type', 'image/avif');
       instance
-        .avif({ quality, effort: 6, chromaSubsampling: '4:2:0' })
+        .avif({ quality, effort: 4, chromaSubsampling: '4:2:0' })
         .pipe(res);
     }
   } else {
