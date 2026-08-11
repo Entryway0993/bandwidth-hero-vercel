@@ -59,7 +59,8 @@ function detectContentType(buffer) {
 }
 
 export default async function proxy(req, res) {
-  const targetUrl = req.opts.url;
+  // 🛑 BULLETPROOF FIX: Check req.opts first, fallback to raw query string if middleware desyncs
+  const targetUrl = req.opts?.url || req.query?.url;
 
   if (!targetUrl) {
     return res.status(400).json({ error: 'Missing URL parameter' });
