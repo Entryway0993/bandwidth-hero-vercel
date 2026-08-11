@@ -113,23 +113,42 @@ export default async function proxy(req, res) {
 
   try {
     // 🛑 CLOUDFLARE RELAY: Route traffic through your Worker
-    const WORKER_URL = process.env.CF_WORKER_URL || 'https://your-worker-name.your-username.workers.dev';
+    let workerBase = process.env.CF_WORKER_URL || '';
     
-    // 🛑 CRITICAL FIX: If you haven't set CF_WORKER_URL in Vercel env vars, 
-    // you MUST replace the placeholder below with your ACTUAL worker URL.
-    const workerTarget = `${WORKER_URL}/?url=${encodeURIComponent(targetUrl)}`;
+    // Clean up garbage values
+    if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
+    
+    // Force https if they forgot the protocol
+    if (workerBase && !workerBase.startsWith('http')) {
+      workerBase = 'https://' + workerBase;
+    }
+    
+    // Remove trailing slashes to prevent double-slash errors
+    if (workerBase.endsWith('/')) {
+      workerBase = workerBase.slice(0, -1);
+    }
 
-    const simpleConfig = {
-      headers: config.headers,
-      timeout: config.timeout,
-      responseType: 'buffer',
-      decompress: true,
-      throwHttpErrors: false,
-      followRedirect: true,
-      retry: { limit: 0 }
-    };
+    let fetchUrl = targetUrl;
+    let fetchConfig = config;
 
-    const request = got(workerTarget, simpleConfig);
+    // ONLY use the worker if we have a valid, fully-qualified URL
+    if (workerBase && workerBase.startsWith('https://')) {
+      fetchUrl = `${workerBase}/?url=${encodeURIComponent(targetUrl)}`;
+      fetchConfig = {
+        headers: config.headers,
+        timeout: config.timeout,
+        responseType: 'buffer',
+        decompress: true,
+        throwHttpErrors: false,
+        followRedirect: true,
+        retry: { limit: 0 }
+      };
+      console.log('🔀 ROUTING THROUGH WORKER:', fetchUrl);
+    } else {
+      console.log('⚠️ WORKER URL MISSING OR MALFORMED. FALLING BACK TO DIRECT FETCH.');
+    }
+
+    const request = got(fetchUrl, fetchConfig);
 
     // 🛑 SURGICAL FIX: DEFUSE THE RAM BOMB
     request.on('downloadProgress', (progress) => {
