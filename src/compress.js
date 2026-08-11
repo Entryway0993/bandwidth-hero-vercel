@@ -4,18 +4,21 @@ sharp.cache({ memory: 50, files: 0 });
 sharp.concurrency(1);
 sharp.simd(true);
 
+// AVIF/WebP codec hard wall: 16383px per dimension. JPEG goes to 65535.
 const MAX_CODEC_DIM = 16383;
-// 🛑 Above this pixel count → JPEG (AVIF would timeout)
-const AVIF_PIXEL_CAP = 20_000_000;
-// 🛑 Below this pixel count → effort 4 (small images encode fast, safe to max out)
+// 🛑 Sharp's absolute ceiling. Anything over this throws before we even encode.
+const SHARP_PIXEL_LIMIT = 40_000_000;
+// 🛑 Below this → effort 4 (small, safe to max out)
 const SMALL_PIXEL_LINE = 3_000_000;
+// 🛑 Below this (and above small) → effort 3. Above this → effort 2.
+const MID_PIXEL_LINE = 20_000_000;
 
 async function compress(req, res, inputBuffer) {
   const { quality, grayscale } = req.opts;
   
   const instance = sharp(inputBuffer, {
     animated: true,
-    limitInputPixels: 40_000_000,
+    limitInputPixels: SHARP_PIXEL_LIMIT,
   });
   
   const metadata = await instance.metadata();
@@ -40,29 +43,29 @@ async function compress(req, res, inputBuffer) {
       .webp({ quality, effort: 4, smartSubsample: true, animated: true })
       .pipe(res);
   } else if (req.opts.webp) {
-    if (maxDim > MAX_CODEC_DIM || totalPixels > 30_000_000) {
-      // Absolute monsters — only JPEG can survive these
-      res.setHeader('Content-Type', 'image/jpeg');
-      instance
-        .jpeg({ quality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' })
-        .pipe(res);
-    } else if (totalPixels > AVIF_PIXEL_CAP) {
-      // Big strips — AVIF would timeout, so JPEG takes the wheel
+    if (maxDim > MAX_CODEC_DIM) {
+      // Only the hard codec dimension wall forces JPEG now
       res.setHeader('Content-Type', 'image/jpeg');
       instance
         .jpeg({ quality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' })
         .pipe(res);
     } else if (totalPixels < SMALL_PIXEL_LINE) {
-      // 🛑 SMALL IMAGES: effort 4 — small enough to max out compression safely
+      // 🛑 SMALL: effort 4 — fast enough to max out
       res.setHeader('Content-Type', 'image/avif');
       instance
         .avif({ quality, effort: 4, chromaSubsampling: '4:2:0' })
         .pipe(res);
-    } else {
-      // 🛑 MEDIUM STRIPS: effort 3 — the balance between squeeze and survival
+    } else if (totalPixels < MID_PIXEL_LINE) {
+      // 🛑 MEDIUM: effort 3 — balance of squeeze and speed
       res.setHeader('Content-Type', 'image/avif');
       instance
         .avif({ quality, effort: 3, chromaSubsampling: '4:2:0' })
+        .pipe(res);
+    } else {
+      // 🛑 LARGE (20MP → 40MP): effort 2 — the survival gamble at Sharp's ceiling
+      res.setHeader('Content-Type', 'image/avif');
+      instance
+        .avif({ quality, effort: 2, chromaSubsampling: '4:2:0' })
         .pipe(res);
     }
   } else {
