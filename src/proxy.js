@@ -59,12 +59,27 @@ function detectContentType(buffer) {
 }
 
 export default async function proxy(req, res) {
-  // 🛑 BULLETPROOF FIX: Check req.opts first, fallback to raw query string if middleware desyncs
-  const targetUrl = req.opts?.url || req.query?.url;
+  let targetUrl = req.opts?.url || req.query?.url;
 
-  if (!targetUrl) {
+  // 🛑 TITANIUM SHIELD: Force garbage into a single, valid string
+  if (Array.isArray(targetUrl)) {
+    targetUrl = targetUrl.find(u => u && typeof u === 'string') || String(targetUrl[0]);
+  }
+  if (typeof targetUrl === 'object' && targetUrl !== null) {
+    targetUrl = String(targetUrl);
+  }
+  if (!targetUrl || typeof targetUrl !== 'string') {
     return res.status(400).json({ error: 'Missing URL parameter' });
   }
+
+  // 🛑 SURGICAL FIX: Clean whitespace and force protocol
+  targetUrl = targetUrl.trim();
+  if (!targetUrl.startsWith('http')) {
+    targetUrl = 'https://' + targetUrl;
+  }
+
+  // 🔍 WIRETAP: Log the exact URL so we can see what the app is sending if it crashes again
+  console.log('🚨 INCOMING URL:', targetUrl);
 
   const { cookie, referer, 'user-agent': userAgent } = req.headers;
 
