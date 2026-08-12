@@ -62,7 +62,7 @@ export default async function proxy(req, res) {
     return res.status(400).json({ error: 'Malformed URL' });
   }
 
-  const { cookie, 'user-agent': userAgent } = req.headers;
+  const { 'user-agent': userAgent } = req.headers;
 
   const headers = {
     'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.113 Safari/537.36',
@@ -77,7 +77,7 @@ export default async function proxy(req, res) {
     'sec-ch-ua-platform': '"Windows"'
   };
 
-  if (cookie) headers.cookie = cookie;
+  // 🛑 SURGICAL FIX: Sever the cookie relay. Do not forward session tokens to arbitrary upstreams.
 
   const config = {
     headers,
