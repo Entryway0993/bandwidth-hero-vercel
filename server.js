@@ -21,7 +21,10 @@ app.use(helmet({
 }));
 
 if (process.env.LOG === '1') {
-  app.use(morgan('tiny'));
+  app.use(morgan('tiny', {
+    // 🛑 PRIVACY SHIELD: Skip logging if an API key is exposed in the query string
+    skip: (req) => !!(req.query.api || req.query.apikey || req.query.api_key)
+  }));
 }
 
 app.get('/healthz', (req, res) => res.status(200).send('OK'));
