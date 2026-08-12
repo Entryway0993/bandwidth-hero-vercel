@@ -49,11 +49,11 @@ export default function copyHeaders(source, target) {
     }
   }
   
-  // 🛑 SURGICAL FIX: IMMUTABLE EDGE CACHING & XSS SHIELD
+  // 🛑 SURGICAL FIX: CACHE POISONING PREVENTION & XSS SHIELD
   // Applied ONCE, outside the loop, to stop the CPU bleeding.
   try {
-    target.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    target.setHeader('Vary', 'Authorization, X-Api-Key');
+    target.setHeader('Cache-Control', 'private, no-store, must-revalidate');
+    target.setHeader('Vary', 'Authorization, X-Api-Key, Cookie');
     target.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'");
   } catch {
     // ignore
