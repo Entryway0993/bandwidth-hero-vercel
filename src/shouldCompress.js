@@ -28,3 +28,4 @@ export default function shouldCompress(req, buffer) {
   } catch {
     return false;
   }
+} 
