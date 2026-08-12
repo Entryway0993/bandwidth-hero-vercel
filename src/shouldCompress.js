@@ -20,7 +20,8 @@ export default function shouldCompress(req, buffer) {
 
   try {
     // 🛑 1GB RAM / 60s CONSTRAINT: O(1) Short-Circuit.
-    if (buffer.length > 14 * 1024 * 1024 && isAnimated(buffer)) {
+    // Bypass compression entirely for massive files to protect serverless memory.
+    if (buffer.length > 14 * 1024 * 1024) {
       return false;
     }
   } catch {
