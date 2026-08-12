@@ -5,6 +5,13 @@ import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
+// 🛑 SURGICAL FIX: Make memory predictable.
+// Do not ask upstream for compressed responses unless you explicitly choose to.
+const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
+
+// Hard download cap. Default 20MB.
+const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
+
 // 🛑 SURGICAL FIX: 60s Vercel limit needs a fetch budget, not a hard 60s gamble.
 // 45s leaves room for sharp compression and response delivery.
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
@@ -71,7 +78,7 @@ export default async function proxy(req, res) {
   const headers = {
     'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.113 Safari/537.36',
     accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-    'accept-encoding': 'gzip, deflate, br',
+    'accept-encoding': UPSTREAM_ACCEPT_ENCODING,
     'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
     'sec-fetch-dest': 'image',
     'sec-fetch-mode': 'no-cors',
@@ -136,7 +143,8 @@ export default async function proxy(req, res) {
 
     request.on('downloadProgress', (progress) => {
       const size = Math.max(progress.total || 0, progress.transferred || 0);
-      if (size > 20 * 1024 * 1024) {
+
+      if (size > MAX_DOWNLOAD_BYTES) {
         request.destroy(new Error('BODY_TOO_LARGE'));
       }
     });
@@ -144,6 +152,9 @@ export default async function proxy(req, res) {
     const response = await request;
     const { statusCode, headers: responseHeaders } = response;
     const rawBody = toBuffer(response.rawBody ?? response.body);
+    if (rawBody.length > MAX_DOWNLOAD_BYTES) {
+      return res.status(413).send('File too large');
+    }
 
     res.setHeader('x-content-type-options', 'nosniff');
     res.setHeader('x-frame-options', 'DENY');
