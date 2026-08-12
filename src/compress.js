@@ -1,3 +1,15 @@
+import { pipeline } from 'node:stream/promises';
+import sharp from 'sharp';
+
+sharp.cache({ memory: 100, files: 0 });
+sharp.concurrency(1);
+sharp.simd(true);
+
+const MAX_CODEC_DIM = 16383;
+const SHARP_PIXEL_LIMIT = 40_000_000;
+const SMALL_PIXEL_LINE = 3_000_000;
+const MID_PIXEL_LINE = 20_000_000;
+
 async function compress(req, res, inputBuffer) {
   const { quality, grayscale } = req.opts;
   
@@ -16,8 +28,6 @@ async function compress(req, res, inputBuffer) {
   
   if (grayscale) instance.grayscale();
   
-  // 🛑 1GB RAM CONSTRAINT: ZOMBIE STREAM DEFUSAL
-  // If the client disconnects mid-download, abort the Sharp instance to save CPU/RAM
   res.on('close', () => {
     if (!res.writableEnded) {
       instance.destroy?.(); 
@@ -65,7 +75,6 @@ async function compress(req, res, inputBuffer) {
       );
     }
   } catch (err) {
-    // Client disconnected or encoding failed
     if (!res.headersSent) {
       res.status(500).end();
     } else {
@@ -73,3 +82,5 @@ async function compress(req, res, inputBuffer) {
     }
   }
 }
+
+export default compress;
