@@ -1,7 +1,9 @@
+import { pipeline } from 'node:stream/promises';
 import sharp from 'sharp';
 
-sharp.cache({ memory: 50, files: 0 });
-sharp.concurrency(1);
+// 🛑 1GB RAM CONSTRAINT: Strict limits to prevent OOM kills
+sharp.cache({ memory: 100, files: 0 }); // Capped at 100MB (10% of total RAM)
+sharp.concurrency(1); // MANDATORY: Force single-threaded processing to save RAM
 sharp.simd(true);
 
 // AVIF/WebP codec hard wall: 16383px per dimension. JPEG goes to 65535.
