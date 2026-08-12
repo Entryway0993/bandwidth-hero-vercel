@@ -84,7 +84,7 @@ export default async function proxy(req, res) {
   };
 
   if (cookie) headers.cookie = cookie;
-  // 🛑 SURGICAL FIX: Referer header dropped to prevent got() crashes on malformed referers
+  // 🛑 Referer dropped to prevent got() crashes on malformed referers
 
   const config = {
     headers,
@@ -111,7 +111,7 @@ export default async function proxy(req, res) {
   };
 
   try {
-    // 🛑 CLOUDFLARE RELAY (Bulletproofed)
+    // 🛑 CLOUDFLARE RELAY: Route traffic through your Worker
     let workerBase = process.env.CF_WORKER_URL || '';
     if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
     if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
@@ -120,9 +120,16 @@ export default async function proxy(req, res) {
     let fetchUrl = targetUrl;
     let fetchConfig = config;
 
-    // ONLY use the worker if we have a valid, fully-qualified URL
     if (workerBase && workerBase.startsWith('https://')) {
-      fetchUrl = `${workerBase}/?url=${encodeURIComponent(targetUrl)}`;
+      // 🛑 VAULT ACCESS: Reads secret from Vercel Env Vars (Safe for Public GitHub)
+      const internalKey = process.env.INTERNAL_KEY;
+      
+      if (!internalKey) {
+        console.warn('⚠️ INTERNAL_KEY missing in Vercel Env Vars');
+      }
+
+      fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}&token=${internalKey}`;
+      
       fetchConfig = {
         headers: config.headers,
         timeout: config.timeout,
@@ -180,7 +187,7 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    // 🛑 THE PARASITE CATCH-ALL: Handles 403s AND malformed redirects (Invalid URL)
+    // 🛑 THE PARASITE CATCH-ALL: Handles 403s AND malformed redirects
     const isBlocked = error.response && error.response.statusCode === 403;
     const isMalformed = error.message === 'Invalid URL';
     
@@ -206,4 +213,4 @@ export default async function proxy(req, res) {
 
     return res.status(502).json({ error: 'Proxy request failed' });
   }
-    }
+}
