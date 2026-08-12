@@ -14,15 +14,11 @@ app.set('trust proxy', 1);
 
 app.use(helmet({
   frameguard: { action: 'deny' },
-  // noSniff is enabled by default in v8
-  // hidePoweredBy is handled natively by app.disable('x-powered-by')
-  // ieNoOpen is removed (IE is dead)
-  crossOriginResourcePolicy: { policy: "cross-origin" } // MANDATORY: Allows your proxy to serve images to external domains
+  crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
 if (process.env.LOG === '1') {
   app.use(morgan('tiny', {
-    // 🛑 PRIVACY SHIELD: Skip logging if an API key is exposed in the query string
     skip: (req) => !!(req.query.api || req.query.apikey || req.query.api_key)
   }));
 }
