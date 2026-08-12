@@ -146,7 +146,8 @@ fetchConfig = {
 
     // 🛑 RAM BOMB DEFUSAL: Kill connections over 20MB instantly
     request.on('downloadProgress', (progress) => {
-      const size = progress.total > 0 ? progress.total : progress.transferred;
+      // NEW (TRUSTS NEITHER, CHECKS BOTH)
+    const size = Math.max(progress.total || 0, progress.transferred || 0);
       if (size > 20 * 1024 * 1024) {
         request.destroy(new Error('BODY_TOO_LARGE'));
       }
