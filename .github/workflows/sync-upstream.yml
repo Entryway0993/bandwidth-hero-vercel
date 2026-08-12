@@ -14,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        # 🛑 SURGICAL FIX: Reverted to v5 to match current 2026 Node.js runner environments.
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -25,12 +24,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
           git remote add upstream https://github.com/hos1818/bandwidth-hero-vercel.git 2>/dev/null || true
           git fetch upstream
           
           # Check if upstream/main is already an ancestor of our HEAD
-          # (Meaning: We already have all their code, they just haven't updated in 3 months)
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "✅ Already up to date. Upstream has no new changes."
             exit 0
@@ -41,7 +38,6 @@ jobs:
           git checkout -b "$SYNC_BRANCH"
           
           # 🛑 SURGICAL FIX: Stop swallowing merge conflicts. 
-          # If merge fails, abort the dirty tree and fail the CI pipeline loudly.
           if ! git merge upstream/main --no-edit --allow-unrelated-histories; then
             echo "❌ Merge conflict detected. Aborting sync to prevent silent failures."
             git merge --abort
