@@ -55,9 +55,12 @@ export function parseSafeUrl(input) {
   if (!ALLOWED_PROTOCOLS.has(url.protocol)) return null;
   if (url.username || url.password) return null;
   
-  // 🛑 FIX: Removed the useless .replace(/^[|]$/g, '')
-  // new URL() already strips IPv6 brackets automatically.
-  const host = url.hostname.toLowerCase();
+  // 🛑 SURGICAL FIX: Node's URL parser RETAINS brackets for IPv6 (e.g., "[::1]").
+  // net.isIP("[::1]") returns false, bypassing the IP check. We must strip them manually.
+  let host = url.hostname.toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) {
+    host = host.slice(1, -1);
+  }
   
   if (!host) return null;
   if (BLOCKED_HOSTS.has(host)) return null;
