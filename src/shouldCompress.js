@@ -19,12 +19,12 @@ export default function shouldCompress(req, buffer) {
   }
 
   try {
-    if (isAnimated(buffer) && buffer.length > 14 * 1024 * 1024) {
+    // 🛑 1GB RAM / 60s CONSTRAINT: O(1) Short-Circuit.
+    // Checks the size FIRST. If the image is < 14MB, isAnimated() is NEVER called.
+    // This prevents V8 from synchronously parsing binary data for 99% of web traffic.
+    if (buffer.length > 14 * 1024 * 1024 && isAnimated(buffer)) {
       return false;
     }
   } catch {
     return false;
   }
-
-  return true;
-}
