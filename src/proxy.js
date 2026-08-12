@@ -5,6 +5,10 @@ import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
+// 🛑 SURGICAL FIX: 60s Vercel limit needs a fetch budget, not a hard 60s gamble.
+// 45s leaves room for sharp compression and response delivery.
+const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
+
 const CLOUDFLARE_STATUS_CODES = new Set([403, 503]);
 
 const chromeCipherAgent = new Agent({
@@ -83,7 +87,7 @@ export default async function proxy(req, res) {
     headers,
     dnsLookup: safeLookup,
     agent: { https: chromeCipherAgent },
-    timeout: { request: 30000, response: 15000 },
+    timeout: { request: REQUEST_TIMEOUT_MS, response: REQUEST_TIMEOUT_MS },
     responseType: 'buffer',
     decompress: true,
     throwHttpErrors: false,
