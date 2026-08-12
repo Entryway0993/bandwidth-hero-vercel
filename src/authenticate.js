@@ -26,15 +26,13 @@ function parseBasicAuth(req) {
 
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const bufferA = Buffer.from(a);
-  const bufferB = Buffer.from(b);
   
-  if (bufferA.length !== bufferB.length) {
-    crypto.timingSafeEqual(bufferB, bufferB);
-    return false;
-  }
+  // 🛑 SURGICAL FIX: Hash both inputs to eliminate length-based timing leaks.
+  // SHA-256 ensures both buffers are exactly 32 bytes before comparison.
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
   
-  return crypto.timingSafeEqual(bufferA, bufferB);
+  return crypto.timingSafeEqual(hashA, hashB);
 }
 
 export default function authenticate(req, res, next) {
