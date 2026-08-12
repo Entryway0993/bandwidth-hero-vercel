@@ -81,42 +81,44 @@ export function safeLookup(hostname, options, callback) {
     callback = options;
     options = {};
   }
-  
+
   const wantsAll = Boolean(options?.all);
-  
-  const lookupOptions = {
-    all: true,
-    verbatim: false
-  };
-  
-  if (options?.family === 4 || options?.family === 6) {
-    lookupOptions.family = options.family;
-  }
-  
-  dns.lookup(hostname, lookupOptions, (err, addresses) => {
-    if (err) return callback(err);
-    
-    const publicAddresses = (addresses || []).filter(
+  const family = options?.family;
+
+  // 🛑 SURGICAL FIX: Use dns.resolve (c-ares) instead of dns.lookup (libc).
+  // This is non-blocking, prevents event loop starvation, and ignores /etc/hosts poisoning.
+  const resolver = new dns.Resolver();
+
+  const resolvePromises = [];
+  if (!family || family === 4) resolvePromises.push(resolver.resolve4(hostname).catch(() => []));
+  if (!family || family === 6) resolvePromises.push(resolver.resolve6(hostname).catch(() => []));
+
+  Promise.all(resolvePromises).then(([v4 = [], v6 = []]) => {
+    const addresses = [
+      ...v4.map(addr => ({ address: addr, family: 4 })),
+      ...v6.map(addr => ({ address: addr, family: 6 }))
+    ];
+
+    const publicAddresses = addresses.filter(
       entry => entry && entry.address && isPublicIP(entry.address)
     );
-    
+
     if (!publicAddresses.length) {
       const error = new Error('SSRF_BLOCKED_DNS');
       error.code = 'SSRF_BLOCKED_DNS';
       return callback(error);
     }
-    
-    publicAddresses.sort((a, b) => {
-      if (a.family === b.family) return 0;
-      return a.family === 4 ? -1 : 1;
-    });
-    
+
+    // Sort IPv4 first (matches verbatim: false behavior)
+    publicAddresses.sort((a, b) => a.family === 4 ? -1 : 1);
+
     if (wantsAll) {
       return callback(null, publicAddresses);
     }
-    
+
     const chosen = publicAddresses[0];
-    
     callback(null, chosen.address, chosen.family);
+  }).catch(err => {
+    callback(err);
   });
 }
