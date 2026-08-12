@@ -10,31 +10,66 @@ const SHARP_PIXEL_LIMIT = 40_000_000;
 const SMALL_PIXEL_LINE = 3_000_000;
 const MID_PIXEL_LINE = 20_000_000;
 
-async function compress(req, res, inputBuffer) {
-  const { quality, grayscale, format = 'webp' } = req.opts;
+function sendOriginal(req, res, inputBuffer) {
+  try {
+    if (!res.headersSent && !res.writableEnded) {
+      const originType = req.opts?.originType || 'application/octet-stream';
 
-  const instance = sharp(inputBuffer, {
-    animated: true,
-    limitInputPixels: SHARP_PIXEL_LIMIT,
-  });
-
-  const metadata = await instance.metadata();
-  const animated = (metadata.pages || 1) > 1;
-
-  const outWidth = metadata.width || 0;
-  const outHeight = metadata.height || 0;
-  const maxDim = Math.max(outWidth, outHeight);
-  const totalPixels = outWidth * outHeight;
-
-  if (grayscale) instance.grayscale();
-
-  res.on('close', () => {
-    if (!res.writableEnded) {
-      instance.destroy?.();
+      res.setHeader('Content-Type', originType);
+      res.setHeader('Content-Length', inputBuffer.length);
+      res.status(200).end(inputBuffer);
+      return;
     }
-  });
+
+    if (!res.writableEnded) {
+      res.end();
+    }
+  } catch {
+    try {
+      if (!res.writableEnded) res.end();
+    } catch {
+      // Last resort: connection is already dead.
+    }
+  }
+}
+
+async function compress(req, res, inputBuffer) {
+  let format = req.opts?.format;
+
+  // Backward compatibility with older params.js using req.opts.webp
+  if (!format) {
+    format = req.opts?.webp === false ? 'jpeg' : 'webp';
+  }
+
+  if (!['avif', 'webp', 'jpeg'].includes(format)) {
+    format = 'webp';
+  }
+
+  const quality = req.opts?.quality ?? 40;
+  const grayscale = req.opts?.grayscale ?? false;
 
   try {
+    const instance = sharp(inputBuffer, {
+      animated: true,
+      limitInputPixels: SHARP_PIXEL_LIMIT,
+    });
+
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        instance.destroy?.();
+      }
+    });
+
+    const metadata = await instance.metadata();
+    const animated = (metadata.pages || 1) > 1;
+
+    const outWidth = metadata.width || 0;
+    const outHeight = metadata.height || 0;
+    const maxDim = Math.max(outWidth, outHeight);
+    const totalPixels = outWidth * outHeight;
+
+    if (grayscale) instance.grayscale();
+
     if (animated) {
       res.setHeader('Content-Type', 'image/webp');
       await pipeline(
@@ -83,11 +118,8 @@ async function compress(req, res, inputBuffer) {
       res
     );
   } catch (err) {
-    if (!res.headersSent) {
-      res.status(500).end();
-    } else {
-      res.end();
-    }
+    // 🛑 SURGICAL FIX: If compression fails, serve the original image instead of dying with 500.
+    sendOriginal(req, res, inputBuffer);
   }
 }
 
