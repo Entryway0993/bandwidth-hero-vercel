@@ -187,17 +187,17 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    // 🛑 THE PARASITE CATCH-ALL: Handles 403s AND malformed redirects
-    const isBlocked = error.response && error.response.statusCode === 403;
-    const isMalformed = error.message === 'Invalid URL';
-    
-    if ((isBlocked || isMalformed) && !req.opts.retried) {
-      req.opts.retried = true; 
-      req.opts.url = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-      return proxy(req, res); 
-    }
+const isBlocked = error.response && error.response.statusCode === 403;
+const isMalformed = error.message === 'Invalid URL';
 
-    const code = error.code;
+if (isBlocked) {
+  return res.status(403).json({ error: 'Blocked by upstream WAF' });
+}
+if (isMalformed) {
+  return res.status(400).json({ error: 'Malformed URL after redirect' });
+}
+
+const code = error.code;
 
     if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
       return res.status(403).json({ error: 'Blocked by SSRF guard' });
