@@ -130,17 +130,16 @@ export default async function proxy(req, res) {
         console.warn('⚠️ INTERNAL_KEY missing in Vercel Env Vars');
       }
 
-      fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}&token=${internalKey}`;
-      
-      fetchConfig = {
-        headers: config.headers,
-        timeout: config.timeout,
-        responseType: 'buffer',
-        decompress: true,
-        throwHttpErrors: false,
-        followRedirect: true,
-        retry: { limit: 0 }
-      };
+      fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
+fetchConfig = {
+  headers: { ...config.headers, 'x-internal-key': internalKey },
+  timeout: config.timeout,
+  responseType: 'buffer',
+  decompress: true,
+  throwHttpErrors: false,
+  followRedirect: true,
+  retry: { limit: 0 }
+};
     }
 
     const request = got(fetchUrl, fetchConfig);
