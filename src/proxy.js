@@ -90,7 +90,9 @@ export default async function proxy(req, res) {
     headers,
     dnsLookup: safeLookup,
     agent: { https: chromeCipherAgent },
-    timeout: { request: 45000, response: 15000 },
+    // 🛑 60s TIMEOUT CONSTRAINT: 30s fetch + 15s process = 45s. 
+    // Leaves a 15s safety buffer before the hard 60s orchestrator kill.
+    timeout: { request: 30000, response: 15000 }, 
     responseType: 'buffer',
     decompress: true,
     throwHttpErrors: false,
