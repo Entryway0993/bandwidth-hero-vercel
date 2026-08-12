@@ -35,12 +35,15 @@ function params(req, res, next) {
     let { url } = req.query;
     
     // 🛑 SURGICAL FIX: If the dumb app swallowed the URL into the API key
-    // e.g., ?api=SECRET/?url=https://...
     if (!url && req.query.api) {
       const apiGarbage = String(req.query.api);
       const urlMatch = apiGarbage.match(/[?&]url=([^&]+)/);
       if (urlMatch) {
-        url = decodeURIComponent(urlMatch[1]);
+        try {
+          url = decodeURIComponent(urlMatch[1]);
+        } catch {
+          return res.status(400).json({ error: 'Malformed URL encoding.' });
+        }
       }
     }
 
@@ -49,9 +52,10 @@ function params(req, res, next) {
     }
     
     if (Array.isArray(url)) {
-      // 🛑 SURGICAL FIX: Use .find() instead of .pop()
-      // Grabs the FIRST valid URL to align with frontend WAF inspections and prevent HPP bypasses.
-      url = url.find(u => u && u.trim()) || url[0];
+      // 🛑 SURGICAL FIX: Strict HPP Rejection.
+      // Guessing the "right" URL from an array is a WAF bypass trap. 
+      // If the client sends multiple URL parameters, reject it instantly.
+      return res.status(400).json({ error: 'Multiple URL parameters are not allowed.' });
     }
     
     if (!url) {
@@ -83,8 +87,7 @@ function params(req, res, next) {
         DEFAULT_QUALITY,
         MIN_QUALITY,
         MAX_QUALITY
-      ),
-      maxWidth: 0 // Dead code confirmed. Kept at 0.
+      )
     };
     
     return next();
