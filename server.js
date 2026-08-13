@@ -45,11 +45,15 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// 🛑 SURGICAL FIX: Global error handler to prevent stack trace leakage.
+// 🛑 SURGICAL FIX: Global error handler to prevent stack trace leakage and zombie sockets.
 app.use((err, req, res, next) => {
   console.error('[Global Error]', err);
   if (!res.headersSent) {
     res.status(500).json({ error: 'Internal server error' });
+  } else {
+    // If headers are already sent, the stream is tainted.
+    // Violently sever the TCP connection so the client fails fast instead of hanging.
+    req.socket?.destroy();
   }
 });
 
