@@ -12,19 +12,21 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
+// 🛑 SURGICAL FIX: Disable Helmet's CSP to save CPU. 
+// copyHeaders.js handles the final CSP injection.
 app.use(helmet({
+  contentSecurityPolicy: false,
   frameguard: { action: 'deny' },
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
 if (process.env.LOG === '1') {
   app.use(morgan('tiny', {
-    skip: (req) => !!(req.query.api || req.query.apikey || req.query.api_key)
+    skip: (req) => !!(req.query.api || req.query.apikey || req.query.api_key || req.headers['x-api-key'])
   }));
 }
 
-// 🛑 SURGICAL FIX: Method guillotine for Vercel/Express.
-// An image compression proxy only speaks GET.
+// Method guillotine.
 app.use((req, res, next) => {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET');
@@ -33,10 +35,23 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/healthz', (req, res) => res.status(200).send('OK'));
+app.get('/healthz', (req, res) => res.status(200).json({ status: 'OK' }));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 app.use(authenticate, params, proxy);
+
+// 🛑 SURGICAL FIX: Catch-all 404 to prevent HTML leakage.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// 🛑 SURGICAL FIX: Global error handler to prevent stack trace leakage.
+app.use((err, req, res, next) => {
+  console.error('[Global Error]', err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
