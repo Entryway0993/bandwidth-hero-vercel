@@ -159,13 +159,40 @@ export default async function proxy(req, res) {
     res.setHeader('x-proxy-cache', 'MISS');
 
     if (CLOUDFLARE_STATUS_CODES.has(statusCode)) {
-      return bypass(req, res, rawBody, statusCode);
+      return res.status(statusCode === 503 ? 503 : 403).json({
+        error: 'Blocked by upstream WAF or challenge'
+      });
     }
 
-    let contentType = String(responseHeaders['content-type'] || '');
-    if (!contentType.trim().toLowerCase().startsWith('image/')) {
+    if (statusCode < 200 || statusCode >= 300) {
+      const safeStatus = Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 600
+        ? statusCode
+        : 502;
+
+      return res.status(safeStatus).json({
+        error: 'Upstream request failed'
+      });
+    }
+
+    let contentType = String(responseHeaders['content-type'] || '').trim().toLowerCase();
+
+    if (!contentType.startsWith('image/')) {
       const detected = detectContentType(rawBody);
       if (detected.startsWith('image/')) contentType = detected;
+    }
+
+    // 🛑 SURGICAL FIX: Do not become an open relay for non-image content.
+    if (!contentType.startsWith('image/')) {
+      return res.status(415).json({
+        error: 'Unsupported media type: only images are allowed'
+      });
+    }
+
+    // 🛑 SURGICAL FIX: SVG is an XSS parasite. Do not serve it.
+    if (contentType === 'image/svg+xml') {
+      return res.status(415).json({
+        error: 'SVG is not allowed'
+      });
     }
 
     delete responseHeaders['content-encoding'];
@@ -173,7 +200,7 @@ export default async function proxy(req, res) {
 
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
 
-    if (contentType) res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Type', contentType);
 
     req.opts.originType = contentType;
 
