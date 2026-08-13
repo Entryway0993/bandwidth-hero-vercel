@@ -10,6 +10,23 @@ const SHARP_PIXEL_LIMIT = 40_000_000;
 const SMALL_PIXEL_LINE = 3_000_000;
 const MID_PIXEL_LINE = 20_000_000;
 
+function envInt(name, fallback, min = 0, max = 9) {
+  const n = parseInt(process.env[name], 10);
+
+  if (Number.isNaN(n)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(n, min), max);
+}
+
+// Faster defaults for serverless survival.
+// Raise them only if you have timeout headroom.
+const AVIF_EFFORT_SMALL = envInt('AVIF_EFFORT_SMALL', 4);
+const AVIF_EFFORT_MEDIUM = envInt('AVIF_EFFORT_MEDIUM', 3);
+const AVIF_EFFORT_LARGE = envInt('AVIF_EFFORT_LARGE', 2);
+const WEBP_EFFORT = envInt('WEBP_EFFORT', 4);
+
 function sendOriginal(req, res, inputBuffer) {
   try {
     if (!res.headersSent && !res.writableEnded) {
@@ -28,7 +45,7 @@ function sendOriginal(req, res, inputBuffer) {
     try {
       if (!res.writableEnded) res.end();
     } catch {
-      // Last resort: connection is already dead.
+      // Connection is already dead.
     }
   }
 }
@@ -36,7 +53,7 @@ function sendOriginal(req, res, inputBuffer) {
 async function compress(req, res, inputBuffer) {
   let format = req.opts?.format;
 
-  // Backward compatibility with older params.js using req.opts.webp
+  // Backward compatibility with older params.js using req.opts.webp.
   if (!format) {
     format = req.opts?.webp === false ? 'jpeg' : 'webp';
   }
@@ -51,7 +68,7 @@ async function compress(req, res, inputBuffer) {
   try {
     const instance = sharp(inputBuffer, {
       animated: true,
-      limitInputPixels: SHARP_PIXEL_LIMIT,
+      limitInputPixels: SHARP_PIXEL_LIMIT
     });
 
     res.on('close', () => {
@@ -68,66 +85,79 @@ async function compress(req, res, inputBuffer) {
     const maxDim = Math.max(outWidth, outHeight);
     const totalPixels = outWidth * outHeight;
 
-    if (grayscale) instance.grayscale();
+    if (grayscale) {
+      instance.grayscale();
+    }
 
     if (animated) {
       res.setHeader('Content-Type', 'image/webp');
+
       await pipeline(
-        instance.webp({ quality, effort: 4, smartSubsample: true, animated: true }),
+        instance.webp({
+          quality,
+          effort: WEBP_EFFORT,
+          smartSubsample: true,
+          animated: true
+        }),
         res
       );
+
       return;
     }
 
     if (format === 'avif' && maxDim <= MAX_CODEC_DIM) {
       res.setHeader('Content-Type', 'image/avif');
 
+      let effort = AVIF_EFFORT_LARGE;
+
       if (totalPixels < SMALL_PIXEL_LINE) {
-        await pipeline(
-          instance.avif({ quality, effort: 4, chromaSubsampling: '4:2:0' }),
-          res
-        );
+        effort = AVIF_EFFORT_SMALL;
       } else if (totalPixels < MID_PIXEL_LINE) {
-        await pipeline(
-          instance.avif({ quality, effort: 3, chromaSubsampling: '4:2:0' }),
-          res
-        );
-      } else {
-        await pipeline(
-          instance.avif({ quality, effort: 2, chromaSubsampling: '4:2:0' }),
-          res
-        );
+        effort = AVIF_EFFORT_MEDIUM;
       }
+
+      await pipeline(
+        instance.avif({
+          quality,
+          effort,
+          chromaSubsampling: '4:2:0'
+        }),
+        res
+      );
 
       return;
     }
 
     if (format === 'webp' && maxDim <= MAX_CODEC_DIM) {
       res.setHeader('Content-Type', 'image/webp');
+
       await pipeline(
-        instance.webp({ quality, effort: 4, smartSubsample: true }),
+        instance.webp({
+          quality,
+          effort: WEBP_EFFORT,
+          smartSubsample: true
+        }),
         res
       );
+
       return;
     }
 
-    // Safe fallback for JPEG, unsupported codec dimensions, or forced AVIF on huge images.
+    // Safe fallback for JPEG, huge dimensions, or unsupported codec cases.
     res.setHeader('Content-Type', 'image/jpeg');
+
     await pipeline(
-      instance.jpeg({ quality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' }),
+      instance.jpeg({
+        quality,
+        progressive: true,
+        mozjpeg: true,
+        chromaSubsampling: '4:2:0'
+      }),
       res
     );
-  } catch (err) {
-    // 🛑 SURGICAL FIX: Prevent Franken-Image corruption.
-    if (res.headersSent) {
-      // Headers are already flushed. The stream is tainted.
-      // Appending the original image now will create a corrupted blob.
-      // We must violently sever the connection so the client knows it failed.
-      res.destroy();
-    } else {
-      // Headers are NOT sent. We can safely fallback to the original image.
-      sendOriginal(req, res, inputBuffer);
-    }
+  } catch {
+    // If compression fails, serve the original image instead of dying.
+    sendOriginal(req, res, inputBuffer);
   }
 }
 
