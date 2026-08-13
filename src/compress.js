@@ -20,8 +20,7 @@ function envInt(name, fallback, min = 0, max = 9) {
   return Math.min(Math.max(n, min), max);
 }
 
-// Faster defaults for serverless survival.
-// Raise them only if you have timeout headroom.
+// Heavier AVIF blade.
 const AVIF_EFFORT_SMALL = envInt('AVIF_EFFORT_SMALL', 4);
 const AVIF_EFFORT_MEDIUM = envInt('AVIF_EFFORT_MEDIUM', 3);
 const AVIF_EFFORT_LARGE = envInt('AVIF_EFFORT_LARGE', 2);
@@ -65,6 +64,12 @@ async function compress(req, res, inputBuffer) {
   const quality = req.opts?.quality ?? 40;
   const grayscale = req.opts?.grayscale ?? false;
 
+  // Normal images cap.
+  const maxOutputDim = Number(req.opts?.maxDim) || 0;
+
+  // Manga/manhwa/manhua long strip width cap.
+  const maxStripWidth = Number(req.opts?.maxStripWidth) || 0;
+
   try {
     const instance = sharp(inputBuffer, {
       animated: true,
@@ -80,13 +85,72 @@ async function compress(req, res, inputBuffer) {
     const metadata = await instance.metadata();
     const animated = (metadata.pages || 1) > 1;
 
-    const outWidth = metadata.width || 0;
-    const outHeight = metadata.height || 0;
-    const maxDim = Math.max(outWidth, outHeight);
+    let outWidth = metadata.width || 0;
+    let outHeight = metadata.height || 0;
+    const orientation = metadata.orientation || 1;
+
+    // If EXIF says the image is rotated 90/270, swap effective dimensions.
+    if (!animated && orientation >= 5 && orientation <= 8) {
+      const tmp = outWidth;
+      outWidth = outHeight;
+      outHeight = tmp;
+    }
+
+    const originalMaxDim = Math.max(outWidth, outHeight);
     const totalPixels = outWidth * outHeight;
+
+    // Long vertical comic strip detection.
+    const isLongStrip = outHeight > outWidth * 3;
+
+    // EXIF auto-rotate for static images.
+    if (!animated && orientation > 1) {
+      instance.rotate();
+    }
+
+    let estimatedPixels = totalPixels;
+
+    if (!animated) {
+      if (isLongStrip) {
+        // 🛑 MANGA / MANHWA / MANHUA MODE:
+        // Cap width only. Never crush the height.
+        if (maxStripWidth > 0 && outWidth > maxStripWidth) {
+          instance.resize({
+            width: maxStripWidth,
+            withoutEnlargement: true,
+            kernel: 'lanczos3'
+          });
+
+          estimatedPixels = Math.round(totalPixels * (maxStripWidth / outWidth));
+        }
+      } else if (maxOutputDim > 0 && originalMaxDim > maxOutputDim) {
+        // 🛑 NORMAL IMAGE MODE:
+        // Cap max side, keep aspect ratio.
+        instance.resize({
+          width: maxOutputDim,
+          height: maxOutputDim,
+          fit: 'inside',
+          withoutEnlargement: true,
+          kernel: 'lanczos3'
+        });
+
+        const scale = maxOutputDim / originalMaxDim;
+        estimatedPixels = Math.round(totalPixels * scale * scale);
+      }
+    }
 
     if (grayscale) {
       instance.grayscale();
+    }
+
+    let effectiveMaxDim = originalMaxDim;
+
+    if (!animated) {
+      if (isLongStrip) {
+        // Width-only resize does not reduce height.
+        effectiveMaxDim = outHeight;
+      } else if (maxOutputDim > 0 && originalMaxDim > maxOutputDim) {
+        effectiveMaxDim = maxOutputDim;
+      }
     }
 
     if (animated) {
@@ -105,14 +169,14 @@ async function compress(req, res, inputBuffer) {
       return;
     }
 
-    if (format === 'avif' && maxDim <= MAX_CODEC_DIM) {
+    if (format === 'avif' && effectiveMaxDim <= MAX_CODEC_DIM) {
       res.setHeader('Content-Type', 'image/avif');
 
       let effort = AVIF_EFFORT_LARGE;
 
-      if (totalPixels < SMALL_PIXEL_LINE) {
+      if (estimatedPixels < SMALL_PIXEL_LINE) {
         effort = AVIF_EFFORT_SMALL;
-      } else if (totalPixels < MID_PIXEL_LINE) {
+      } else if (estimatedPixels < MID_PIXEL_LINE) {
         effort = AVIF_EFFORT_MEDIUM;
       }
 
@@ -128,7 +192,7 @@ async function compress(req, res, inputBuffer) {
       return;
     }
 
-    if (format === 'webp' && maxDim <= MAX_CODEC_DIM) {
+    if (format === 'webp' && effectiveMaxDim <= MAX_CODEC_DIM) {
       res.setHeader('Content-Type', 'image/webp');
 
       await pipeline(
