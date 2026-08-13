@@ -26,12 +26,27 @@ if (process.env.LOG === '1') {
   }));
 }
 
-// Method guillotine.
+// Method guillotine with harmless HEAD/OPTIONS absorption.
 app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Allow', 'GET');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
+    res.setHeader('Access-Control-Allow-Headers', 'x-api-key, content-type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    return res.status(204).end();
+  }
+
+  if (req.method === 'HEAD') {
+    res.setHeader('Allow', 'GET');
+    return res.status(200).end();
+  }
+
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET');
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
+
   next();
 });
 
