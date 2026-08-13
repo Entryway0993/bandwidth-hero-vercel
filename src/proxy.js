@@ -6,14 +6,12 @@ import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
 // 🛑 SURGICAL FIX: Make memory predictable.
-// Do not ask upstream for compressed responses unless you explicitly choose to.
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
 
 // Hard download cap. Default 20MB.
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
 
-// 🛑 SURGICAL FIX: 60s Vercel limit needs a fetch budget, not a hard 60s gamble.
-// 45s leaves room for sharp compression and response delivery.
+// 🛑 SURGICAL FIX: 60s Vercel limit needs a fetch budget.
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
 const CLOUDFLARE_STATUS_CODES = new Set([403, 503]);
@@ -75,20 +73,19 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
+  // 🛑 SURGICAL FIX: Updated to Chrome 148 to evade modern WAF bot detection.
   const headers = {
-    'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.113 Safari/537.36',
+    'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     'accept-encoding': UPSTREAM_ACCEPT_ENCODING,
     'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
     'sec-fetch-dest': 'image',
     'sec-fetch-mode': 'no-cors',
     'sec-fetch-site': 'cross-site',
-    'sec-ch-ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    'sec-ch-ua': '"Chromium";v="148", "Not;A=Brand";v="24", "Google Chrome";v="148"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"'
   };
-
-  // 🛑 SURGICAL FIX: Sever the cookie relay. Do not forward session tokens to arbitrary upstreams.
 
   const config = {
     headers,
@@ -143,7 +140,6 @@ export default async function proxy(req, res) {
 
     request.on('downloadProgress', (progress) => {
       const size = Math.max(progress.total || 0, progress.transferred || 0);
-
       if (size > MAX_DOWNLOAD_BYTES) {
         request.destroy(new Error('BODY_TOO_LARGE'));
       }
@@ -152,6 +148,7 @@ export default async function proxy(req, res) {
     const response = await request;
     const { statusCode, headers: responseHeaders } = response;
     const rawBody = toBuffer(response.rawBody ?? response.body);
+    
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
       return res.status(413).send('File too large');
     }
@@ -190,17 +187,18 @@ export default async function proxy(req, res) {
   } catch (error) {
     const isBlocked = error.response && error.response.statusCode === 403;
     const isMalformed = error.message === 'Invalid URL';
+    
+    // 🛑 SURGICAL FIX: Catch the stream destroy error correctly.
+    const isBodyTooLarge = error.message === 'BODY_TOO_LARGE' || error.code === 'ERR_BODY_LARGE' || error.code === 'BODY_TOO_LARGE';
 
     if (isBlocked) return res.status(403).json({ error: 'Blocked by upstream WAF' });
     if (isMalformed) return res.status(400).json({ error: 'Malformed URL after redirect' });
+    if (isBodyTooLarge) return res.status(413).send('File too large');
 
     const code = error.code;
 
     if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
       return res.status(403).json({ error: 'Blocked by SSRF guard' });
-    }
-    if (code === 'ERR_BODY_LARGE' || code === 'BODY_TOO_LARGE') {
-      return res.status(413).send('File too large');
     }
     if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
       return res.status(504).json({ error: 'Origin request timed out' });
@@ -208,4 +206,4 @@ export default async function proxy(req, res) {
 
     return res.status(502).json({ error: 'Proxy request failed' });
   }
-    }
+}
