@@ -118,8 +118,16 @@ async function compress(req, res, inputBuffer) {
       res
     );
   } catch (err) {
-    // 🛑 SURGICAL FIX: If compression fails, serve the original image instead of dying with 500.
-    sendOriginal(req, res, inputBuffer);
+    // 🛑 SURGICAL FIX: Prevent Franken-Image corruption.
+    if (res.headersSent) {
+      // Headers are already flushed. The stream is tainted.
+      // Appending the original image now will create a corrupted blob.
+      // We must violently sever the connection so the client knows it failed.
+      res.destroy();
+    } else {
+      // Headers are NOT sent. We can safely fallback to the original image.
+      sendOriginal(req, res, inputBuffer);
+    }
   }
 }
 
