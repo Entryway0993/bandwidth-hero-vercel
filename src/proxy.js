@@ -5,13 +5,13 @@ import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
-// 🛑 SURGICAL FIX: Make memory predictable.
+// Make memory predictable.
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
 
 // Hard download cap. Default 20MB.
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
 
-// 🛑 SURGICAL FIX: 60s Vercel limit needs a fetch budget.
+// 60s Vercel limit needs a fetch budget.
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
 const CLOUDFLARE_STATUS_CODES = new Set([403, 503]);
@@ -40,15 +40,64 @@ function bypass(req, res, rawBody, statusCode = 200) {
 
 function detectContentType(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 2) return 'application/octet-stream';
-  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
-  if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
-  if (buffer.length >= 4 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
-  if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
-  if (buffer.length >= 12 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
-  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x47 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x38
+  ) {
+    return 'image/gif';
+  }
+
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) {
+    return 'image/bmp';
+  }
+
+  if (
+    buffer.length >= 6 &&
+    buffer[0] === 0x00 &&
+    buffer[1] === 0x00 &&
+    buffer[2] === 0x01 &&
+    buffer[3] === 0x00
+  ) {
+    return 'image/x-icon';
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(4, 8).toString('ascii') === 'ftyp'
+  ) {
     const brand = buffer.subarray(8, 12).toString('ascii');
     if (brand === 'avif' || brand === 'avis') return 'image/avif';
   }
+
   return 'application/octet-stream';
 }
 
@@ -58,6 +107,7 @@ export default async function proxy(req, res) {
   if (Array.isArray(targetUrl)) {
     targetUrl = targetUrl.find(u => u && typeof u === 'string') || String(targetUrl[0]);
   }
+
   if (!targetUrl || typeof targetUrl !== 'string') {
     return res.status(400).json({ error: 'Missing URL parameter' });
   }
@@ -73,7 +123,6 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
-  // 🛑 SURGICAL FIX: Updated to Chrome 148 to evade modern WAF bot detection.
   const headers = {
     'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
@@ -86,6 +135,8 @@ export default async function proxy(req, res) {
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"'
   };
+
+  // Cookie relay is severed. Do not forward session tokens to arbitrary upstreams.
 
   const config = {
     headers,
@@ -122,7 +173,12 @@ export default async function proxy(req, res) {
 
     if (workerBase && workerBase.startsWith('https://')) {
       const internalKey = process.env.INTERNAL_KEY;
-      if (!internalKey) console.warn('⚠️ INTERNAL_KEY missing in Vercel Env Vars');
+
+      if (!internalKey) {
+        return res.status(500).json({
+          error: 'Server misconfigured: INTERNAL_KEY is required when CF_WORKER_URL is set'
+        });
+      }
 
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
       fetchConfig = {
@@ -140,6 +196,7 @@ export default async function proxy(req, res) {
 
     request.on('downloadProgress', (progress) => {
       const size = Math.max(progress.total || 0, progress.transferred || 0);
+
       if (size > MAX_DOWNLOAD_BYTES) {
         request.destroy(new Error('BODY_TOO_LARGE'));
       }
@@ -148,7 +205,7 @@ export default async function proxy(req, res) {
     const response = await request;
     const { statusCode, headers: responseHeaders } = response;
     const rawBody = toBuffer(response.rawBody ?? response.body);
-    
+
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
       return res.status(413).send('File too large');
     }
@@ -174,22 +231,16 @@ export default async function proxy(req, res) {
       });
     }
 
-    let contentType = String(responseHeaders['content-type'] || '').trim().toLowerCase();
+    // Trust magic bytes, not upstream Content-Type lies.
+    const detectedType = detectContentType(rawBody);
 
-    if (!contentType.startsWith('image/')) {
-      const detected = detectContentType(rawBody);
-      if (detected.startsWith('image/')) contentType = detected;
-    }
-
-    // 🛑 SURGICAL FIX: Do not become an open relay for non-image content.
-    if (!contentType.startsWith('image/')) {
+    if (!detectedType.startsWith('image/')) {
       return res.status(415).json({
         error: 'Unsupported media type: only images are allowed'
       });
     }
 
-    // 🛑 SURGICAL FIX: SVG is an XSS parasite. Do not serve it.
-    if (contentType === 'image/svg+xml') {
+    if (detectedType === 'image/svg+xml') {
       return res.status(415).json({
         error: 'SVG is not allowed'
       });
@@ -200,9 +251,9 @@ export default async function proxy(req, res) {
 
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
 
-    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Type', detectedType);
 
-    req.opts.originType = contentType;
+    req.opts.originType = detectedType;
 
     if (shouldCompress(req, rawBody)) {
       await compress(req, res, rawBody);
@@ -214,9 +265,11 @@ export default async function proxy(req, res) {
   } catch (error) {
     const isBlocked = error.response && error.response.statusCode === 403;
     const isMalformed = error.message === 'Invalid URL';
-    
-    // 🛑 SURGICAL FIX: Catch the stream destroy error correctly.
-    const isBodyTooLarge = error.message === 'BODY_TOO_LARGE' || error.code === 'ERR_BODY_LARGE' || error.code === 'BODY_TOO_LARGE';
+
+    const isBodyTooLarge =
+      error.message === 'BODY_TOO_LARGE' ||
+      error.code === 'ERR_BODY_LARGE' ||
+      error.code === 'BODY_TOO_LARGE';
 
     if (isBlocked) return res.status(403).json({ error: 'Blocked by upstream WAF' });
     if (isMalformed) return res.status(400).json({ error: 'Malformed URL after redirect' });
@@ -227,6 +280,7 @@ export default async function proxy(req, res) {
     if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
       return res.status(403).json({ error: 'Blocked by SSRF guard' });
     }
+
     if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
       return res.status(504).json({ error: 'Origin request timed out' });
     }
