@@ -23,6 +23,16 @@ if (process.env.LOG === '1') {
   }));
 }
 
+// 🛑 SURGICAL FIX: Method guillotine for Vercel/Express.
+// An image compression proxy only speaks GET.
+app.use((req, res, next) => {
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET');
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
+  next();
+});
+
 app.get('/healthz', (req, res) => res.status(200).send('OK'));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
