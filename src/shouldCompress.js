@@ -1,5 +1,3 @@
-import isAnimated from 'is-animated';
-
 const EXCLUDED_TYPES = new Set([
   'image/svg+xml',
   'application/pdf',
