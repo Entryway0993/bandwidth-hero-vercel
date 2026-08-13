@@ -85,14 +85,19 @@ export function safeLookup(hostname, options, callback) {
   const wantsAll = Boolean(options?.all);
   const family = options?.family;
 
-  // 🛑 SURGICAL FIX: Use dns.resolve (c-ares) instead of dns.lookup (libc).
-  // This is non-blocking, prevents event loop starvation, and ignores /etc/hosts poisoning.
+  // 🛑 SURGICAL FIX: Force fresh DNS resolution per request.
+  // Prevents DNS rebinding via cached TTLs and stale IP routing.
   const resolver = new dns.Resolver();
+  resolver.setServers([
+    '1.1.1.1',       // Cloudflare Primary
+    '8.8.8.8',       // Google Primary
+    '9.9.9.9'        // Quad9 (Malware blocking)
+  ]);
 
   const resolvePromises = [];
   if (!family || family === 4) resolvePromises.push(resolver.resolve4(hostname).catch(() => []));
   if (!family || family === 6) resolvePromises.push(resolver.resolve6(hostname).catch(() => []));
-
+  
   Promise.all(resolvePromises).then(([v4 = [], v6 = []]) => {
     const addresses = [
       ...v4.map(addr => ({ address: addr, family: 4 })),
