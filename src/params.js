@@ -31,13 +31,14 @@ function parseQuality(q, defaultValue, min, max) {
 }
 
 function parseFormat(req) {
+  // Emergency escape hatch
   if (parseBoolean(req.query.jpeg, false)) return 'jpeg';
-  if (parseBoolean(req.query.avif, false)) return 'avif';
+  
+  // Explicit overrides
   if (parseBoolean(req.query.webp, false)) return 'webp';
+  if (parseBoolean(req.query.avif, false)) return 'avif';
 
-  // Safe default for clients that cannot select AVIF.
-  // If every client definitely supports AVIF, change this to:
-  // return 'avif';
+  // 🛑 FORCED AVIF DEFAULT
   return 'avif';
 }
 
@@ -45,7 +46,6 @@ function params(req, res, next) {
   try {
     let { url } = req.query;
 
-    // 🛑 SURGICAL FIX: If the dumb app swallowed the URL into the API key
     if (!url && req.query.api) {
       const apiGarbage = String(req.query.api);
       const urlMatch = apiGarbage.match(/[?&]url=([^&]+)/);
@@ -64,12 +64,6 @@ function params(req, res, next) {
 
     if (Array.isArray(url)) {
       return res.status(400).json({ error: 'Multiple URL parameters are not allowed.' });
-    }
-
-    if (!url) {
-      return res.status(400).json({
-        error: 'Missing URL.'
-      });
     }
 
     if (!/^https?:\/\//i.test(url)) {
