@@ -9,6 +9,19 @@ const DEFAULT_QUALITY = clampInt(process.env.DEFAULT_QUALITY, 40, 10, 100);
 const MAX_QUALITY = clampInt(process.env.MAX_QUALITY, 100, 10, 100);
 const MIN_QUALITY = clampInt(process.env.MIN_QUALITY, 10, 1, 100);
 
+// Normal images: cap max side.
+const DEFAULT_MAX_OUTPUT_DIM = clampInt(process.env.MAX_OUTPUT_DIM, 2560, 0, 4096);
+
+// Manga/manhwa/manhua long strips: cap width only.
+const DEFAULT_MAX_STRIP_WIDTH = clampInt(process.env.MAX_STRIP_WIDTH, 1600, 0, 4096);
+
+// 🛑 IMPORTANT:
+// false = keep color for manhwa/manhua/normal images
+// true  = grayscale by default, old bandwidth-hero behavior
+const DEFAULT_GRAYSCALE = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.DEFAULT_GRAYSCALE || process.env.DEFAULT_BW || '').trim().toLowerCase()
+);
+
 const AUTH_PARAMS = [
   'api',
   'apikey',
@@ -126,12 +139,31 @@ function params(req, res, next) {
     req.opts = {
       url: safeUrl.href,
       format: parseFormat(req),
-      grayscale: parseBoolean(req.query.bw, true),
+
+      // Use ?bw=1 for grayscale, ?bw=0 for color.
+      grayscale: parseBoolean(req.query.bw, DEFAULT_GRAYSCALE),
+
       quality: parseQuality(
         req.query.l ?? req.query.q ?? req.query.quality,
         DEFAULT_QUALITY,
         MIN_QUALITY,
         MAX_QUALITY
+      ),
+
+      // Normal image max side cap.
+      maxDim: clampInt(
+        req.query.max_dim ?? req.query.maxdim ?? req.query.max,
+        DEFAULT_MAX_OUTPUT_DIM,
+        0,
+        4096
+      ),
+
+      // Long manga/manhwa strip width cap.
+      maxStripWidth: clampInt(
+        req.query.strip_w ?? req.query.stripw ?? req.query.strip_width,
+        DEFAULT_MAX_STRIP_WIDTH,
+        0,
+        4096
       )
     };
 
