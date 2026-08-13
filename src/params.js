@@ -9,6 +9,12 @@ const DEFAULT_QUALITY = clampInt(process.env.DEFAULT_QUALITY, 40, 10, 100);
 const MAX_QUALITY = clampInt(process.env.MAX_QUALITY, 100, 10, 100);
 const MIN_QUALITY = clampInt(process.env.MIN_QUALITY, 10, 1, 100);
 
+const AUTH_PARAMS = [
+  'api',
+  'apikey',
+  'api_key'
+];
+
 function parseBoolean(value, defaultValue) {
   if (value === undefined) return defaultValue;
 
@@ -31,39 +37,76 @@ function parseQuality(q, defaultValue, min, max) {
 }
 
 function parseFormat(req) {
-  // Emergency escape hatch
+  // Emergency escape hatch.
   if (parseBoolean(req.query.jpeg, false)) return 'jpeg';
-  
-  // Explicit overrides
-  if (parseBoolean(req.query.webp, false)) return 'webp';
-  if (parseBoolean(req.query.avif, false)) return 'avif';
 
-  // 🛑 FORCED AVIF DEFAULT
+  // Explicit overrides.
+  if (parseBoolean(req.query.avif, false)) return 'avif';
+  if (parseBoolean(req.query.webp, false)) return 'webp';
+
+  // Forced AVIF default.
   return 'avif';
+}
+
+function extractHiddenUrl(req) {
+  for (const param of AUTH_PARAMS) {
+    const value = req.query[param];
+
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+
+    const authGarbage = Array.isArray(value)
+      ? String(value[0] || '')
+      : String(value);
+
+    const urlMatch = authGarbage.match(/[?&]url=([^&]+)/);
+
+    if (urlMatch) {
+      try {
+        return decodeURIComponent(urlMatch[1]);
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function params(req, res, next) {
   try {
     let { url } = req.query;
 
-    if (!url && req.query.api) {
-      const apiGarbage = String(req.query.api);
-      const urlMatch = apiGarbage.match(/[?&]url=([^&]+)/);
-      if (urlMatch) {
-        try {
-          url = decodeURIComponent(urlMatch[1]);
-        } catch {
-          return res.status(400).json({ error: 'Malformed URL encoding.' });
-        }
+    // Recover URL if the dumb client swallowed it into an auth param.
+    if (!url) {
+      const hiddenUrl = extractHiddenUrl(req);
+
+      if (hiddenUrl === null) {
+        return res.status(400).json({ error: 'Malformed URL encoding.' });
+      }
+
+      if (hiddenUrl) {
+        url = hiddenUrl;
       }
     }
 
-    if (!url) {
+    if (url === undefined || url === null || url === '') {
       return res.status(200).send('bandwidth-hero-proxy');
     }
 
     if (Array.isArray(url)) {
       return res.status(400).json({ error: 'Multiple URL parameters are not allowed.' });
+    }
+
+    if (typeof url !== 'string') {
+      return res.status(400).json({ error: 'Invalid URL parameter.' });
+    }
+
+    url = url.trim();
+
+    if (!url) {
+      return res.status(200).send('bandwidth-hero-proxy');
     }
 
     if (!/^https?:\/\//i.test(url)) {
