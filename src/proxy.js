@@ -77,6 +77,18 @@ function detectContentType(buffer) {
   return 'application/octet-stream';
 }
 
+// 🛑 FETCH EXECUTOR (Tracks download size to prevent RAM bombs)
+function executeFetch(url, cfg) {
+  const request = got(url, cfg);
+  request.on('downloadProgress', (progress) => {
+    const size = Math.max(progress.total || 0, progress.transferred || 0);
+    if (size > MAX_DOWNLOAD_BYTES) {
+      request.destroy(new Error('BODY_TOO_LARGE'));
+    }
+  });
+  return request;
+}
+
 export default async function proxy(req, res) {
   let targetUrl = req.opts?.url || req.query?.url;
 
@@ -147,22 +159,20 @@ export default async function proxy(req, res) {
     }
   };
 
-  try {
-    let workerBase = process.env.CF_WORKER_URL || '';
-    if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
-    if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
-    if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
+  let workerBase = process.env.CF_WORKER_URL || '';
+  if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
+  if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
+  if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
 
-    let fetchUrl = targetUrl;
-    let fetchConfig = config;
+  let fetchUrl = targetUrl;
+  let fetchConfig = config;
+  let isWorkerFetch = false;
 
-    if (workerBase && workerBase.startsWith('https://')) {
-      const internalKey = process.env.INTERNAL_KEY;
+  if (workerBase && workerBase.startsWith('https://')) {
+    const internalKey = process.env.INTERNAL_KEY;
 
-      if (!internalKey) {
-        return sendGhost(res, 300);
-      }
-
+    if (internalKey) {
+      isWorkerFetch = true;
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
       fetchConfig = {
         headers: { ...config.headers, 'x-internal-key': internalKey },
@@ -174,22 +184,63 @@ export default async function proxy(req, res) {
         retry: { limit: 0 }
       };
     }
+  }
 
-    const request = got(fetchUrl, fetchConfig);
+  let response;
+  let statusCode;
+  let responseHeaders;
+  let activeUrl = fetchUrl;
+  let activeConfig = fetchConfig;
 
-    request.on('downloadProgress', (progress) => {
-      const size = Math.max(progress.total || 0, progress.transferred || 0);
-      if (size > MAX_DOWNLOAD_BYTES) {
-        request.destroy(new Error('BODY_TOO_LARGE'));
-      }
-    });
+  try {
+    response = await executeFetch(activeUrl, activeConfig);
+    statusCode = response.statusCode;
+    responseHeaders = response.headers;
 
-    const response = await request;
-    const { statusCode, headers: responseHeaders } = response;
+    // 🛑 WORKER FALLBACK PROTOCOL (Worker 5xx triggers direct rescue)
+    if (isWorkerFetch && statusCode >= 500 && statusCode < 600) {
+      throw new Error('WORKER_5XX_FAILURE');
+    }
+  } catch (err) {
+    if (isWorkerFetch) {
+      // 🛑 WORKER FALLBACK PROTOCOL (Direct-to-Origin Rescue)
+      activeUrl = targetUrl;
+      activeConfig = config;
+      response = await executeFetch(activeUrl, activeConfig);
+      statusCode = response.statusCode;
+      responseHeaders = response.headers;
+    } else {
+      throw err;
+    }
+  }
+
+  // 🛑 403 RETRY PROTOCOL (Automated Hotlink Evasion)
+  if (statusCode === 403) {
+    const retryHeaders = { ...activeConfig.headers, 'user-agent': getRandomUA() };
+    try {
+      response = await executeFetch(activeUrl, { ...activeConfig, headers: retryHeaders });
+      statusCode = response.statusCode;
+      responseHeaders = response.headers;
+    } catch {
+      // Retry failed, keep original 403
+    }
+  }
+
+  try {
     const rawBody = toBuffer(response.rawBody ?? response.body);
 
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
       return sendGhost(res, 3600);
+    }
+
+    // 🛑 ORIGIN OBEDIENCE PROTOCOL (Pass upstream max-age to Worker)
+    const upstreamCacheControl = responseHeaders['cache-control'] || '';
+    const maxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
+    if (maxAgeMatch) {
+      const upstreamMaxAge = parseInt(maxAgeMatch[1], 10);
+      if (!Number.isNaN(upstreamMaxAge) && upstreamMaxAge > 0) {
+        responseHeaders['x-upstream-max-age'] = String(upstreamMaxAge);
+      }
     }
 
     if (statusCode === 404 || statusCode === 410) {
@@ -219,9 +270,8 @@ export default async function proxy(req, res) {
     req.opts.originType = detectedType;
 
     // 🛑 THE GENERATION SAVER (Magic Byte Bypass)
-    // If the upstream is already serving a tiny, modern format, don't re-encode it.
     const isModernFormat = detectedType === 'image/webp' || detectedType === 'image/avif';
-    const isSmallFile = rawBody.length < 150 * 1024; // 150KB threshold
+    const isSmallFile = rawBody.length < 150 * 1024;
 
     if (isModernFormat && isSmallFile) {
       return bypass(req, res, rawBody, statusCode);
@@ -254,4 +304,4 @@ export default async function proxy(req, res) {
 
     return sendGhost(res, 60);
   }
-      }
+    }
