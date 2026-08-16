@@ -22,7 +22,6 @@ const chromeCipherAgent = new Agent({
   maxVersion: 'TLSv1.3'
 });
 
-// 🛑 THE CHAMELEON CLOAK (User-Agent Rotation)
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0',
@@ -100,10 +99,17 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
-  const referer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
+  // 🛑 THE AUTOMATIC REFERER (Origin Injection)
+  const queryReferer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
+  let autoReferer = '';
+  try {
+    const parsedTarget = new URL(targetUrl);
+    autoReferer = parsedTarget.origin;
+  } catch {}
+  
+  const finalReferer = (queryReferer && typeof queryReferer === 'string') ? queryReferer : autoReferer;
 
   const headers = {
-    // 🛑 THE CHAMELEON CLOAK
     'user-agent': userAgent || getRandomUA(),
     accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     'accept-encoding': UPSTREAM_ACCEPT_ENCODING,
@@ -114,7 +120,7 @@ export default async function proxy(req, res) {
     'sec-ch-ua': '"Chromium";v="148", "Not;A=Brand";v="24", "Google Chrome";v="148"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
-    ...(referer && typeof referer === 'string' ? { referer } : {})
+    ...(finalReferer ? { referer: finalReferer } : {})
   };
 
   const config = {
@@ -212,6 +218,15 @@ export default async function proxy(req, res) {
 
     req.opts.originType = detectedType;
 
+    // 🛑 THE GENERATION SAVER (Magic Byte Bypass)
+    // If the upstream is already serving a tiny, modern format, don't re-encode it.
+    const isModernFormat = detectedType === 'image/webp' || detectedType === 'image/avif';
+    const isSmallFile = rawBody.length < 150 * 1024; // 150KB threshold
+
+    if (isModernFormat && isSmallFile) {
+      return bypass(req, res, rawBody, statusCode);
+    }
+
     if (shouldCompress(req, rawBody)) {
       await compress(req, res, rawBody);
       return;
@@ -239,4 +254,4 @@ export default async function proxy(req, res) {
 
     return sendGhost(res, 60);
   }
-}
+      }
