@@ -12,6 +12,9 @@ const VIEWPORT_FALLBACK = parseInt(process.env.VIEWPORT_FALLBACK) || 1080;
 const perceptualCache = new Map();
 const PERCEPTUAL_CACHE_MAX = 500;
 
+const lorekeeperCache = new Map();
+const LOREKEEPER_CACHE_MAX = 200;
+
 function envBool(name, fallback = false) {
   const v = process.env[name];
   if (v === undefined) return fallback;
@@ -28,6 +31,17 @@ const ENABLE_JUDGE = envBool('ENABLE_JUDGE', true);
 const ENABLE_MOIRE = envBool('ENABLE_MOIRE', true);
 const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
 const ENABLE_LUMINANCE = envBool('ENABLE_LUMINANCE', true);
+const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
+const ENABLE_DESKEW = envBool('ENABLE_DESKEW', true);
+const ENABLE_LOREKEEPER = envBool('ENABLE_LOREKEEPER', true);
+const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
+const ENABLE_DITHER_ASSASSIN = envBool('ENABLE_DITHER_ASSASSIN', true);
+const ENABLE_BANDING_EXORCIST = envBool('ENABLE_BANDING_EXORCIST', true);
+const ENABLE_ALPHA_SENTINEL = envBool('ENABLE_ALPHA_SENTINEL', true);
+const ENABLE_LAYOUT_PROPHET = envBool('ENABLE_LAYOUT_PROPHET', true);
+const ENABLE_ENCODING_VERIFIER = envBool('ENABLE_ENCODING_VERIFIER', true);
+const ENABLE_GHOST_STRIPPER = envBool('ENABLE_GHOST_STRIPPER', true);
+const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', true);
 
 async function generatePerceptualHash(buffer) {
   try {
@@ -62,17 +76,277 @@ function setPerceptualCache(hash, result) {
   perceptualCache.set(hash, result);
 }
 
-async function generatePlaceholder(buffer) {
+async function generatePlaceholderAndPalette(buffer) {
   try {
-    const thumb = await sharp(buffer)
+    const { data, info } = await sharp(buffer)
       .resize(32, 32, { fit: 'inside' })
-      .blur(2)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+
+    let sum = 0;
+    let sumSq = 0;
+    const pixelCount = data.length / channels;
+    const colorCounts = new Map();
+
+    for (let i = 0; i < data.length; i += channels) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      sum += lum;
+      sumSq += lum * lum;
+
+      const colorKey = (r << 16) | (g << 8) | b;
+      colorCounts.set(colorKey, (colorCounts.get(colorKey) || 0) + 1);
+    }
+
+    const mean = sum / pixelCount;
+    const stdev = Math.sqrt(Math.max(0, sumSq / pixelCount - mean * mean));
+    const isVoid = stdev < 1;
+
+    let palette = [];
+    if (!isVoid) {
+      const sorted = [...colorCounts.entries()].sort((a, b) => b[1] - a[1]);
+      palette = sorted.slice(0, 3).map(([colorKey]) => {
+        const hex = colorKey.toString(16).padStart(6, '0');
+        return `#${hex}`;
+      });
+    }
+
+    let placeholder = null;
+    if (ENABLE_PLACEHOLDER && !isVoid) {
+      const thumbBuffer = await sharp(buffer)
+        .resize(32, 32, { fit: 'inside' })
+        .blur(2)
+        .grayscale()
+        .jpeg({ quality: 20 })
+        .toBuffer();
+      placeholder = 'data:image/jpeg;base64,' + thumbBuffer.toString('base64');
+    }
+
+    return { placeholder, palette, stdev, isVoid };
+  } catch {
+    return { placeholder: null, palette: [], stdev: 0, isVoid: false };
+  }
+}
+
+async function detectSkew(buffer) {
+  try {
+    const { data, info } = await sharp(buffer)
+      .resize(256, 256, { fit: 'inside' })
       .grayscale()
-      .jpeg({ quality: 20 })
-      .toBuffer();
-    return 'data:image/jpeg;base64,' + thumb.toString('base64');
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const w = info.width;
+    const h = info.height;
+
+    const corners = [
+      data[0],
+      data[w - 1],
+      data[(h - 1) * w],
+      data[h * w - 1],
+    ];
+    const bgValue = corners.reduce((a, b) => a + b, 0) / 4;
+
+    let sumX = 0, sumY = 0, sumXX = 0, sumYY = 0, sumXY = 0, count = 0;
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const v = data[y * w + x];
+        if (Math.abs(v - bgValue) > 30) {
+          sumX += x;
+          sumY += y;
+          sumXX += x * x;
+          sumYY += y * y;
+          sumXY += x * y;
+          count++;
+        }
+      }
+    }
+
+    if (count < 100) return 0;
+
+    const meanX = sumX / count;
+    const meanY = sumY / count;
+    const covXX = sumXX / count - meanX * meanX;
+    const covYY = sumYY / count - meanY * meanY;
+    const covXY = sumXY / count - meanX * meanY;
+
+    const angle = 0.5 * Math.atan2(2 * covXY, covXX - covYY) * (180 / Math.PI);
+
+    if (Math.abs(angle) > 1.5 && Math.abs(angle) < 15) {
+      return angle;
+    }
+
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+function generateLoreHash(buffer) {
+  return createHash('md5').update(buffer).digest('hex').slice(0, 8);
+}
+
+async function readLoreSignature(buffer) {
+  try {
+    const { data, info } = await sharp(buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+    if (channels < 3) return null;
+
+    const blueIdx = 2;
+    let hashStr = '';
+    const maxPixels = Math.min(32, Math.floor(data.length / channels));
+
+    for (let i = 0; i < maxPixels; i++) {
+      hashStr += (data[i * channels + blueIdx] & 1).toString();
+    }
+
+    if (hashStr.length < 32) return null;
+
+    const hashInt = parseInt(hashStr, 2);
+    return hashInt.toString(16).padStart(8, '0');
   } catch {
     return null;
+  }
+}
+
+async function embedLoreSignature(buffer, loreHash) {
+  try {
+    const { data, info } = await sharp(buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+    if (channels < 3) return buffer;
+
+    const blueIdx = 2;
+    const hashInt = parseInt(loreHash, 16);
+    const hashBits = hashInt.toString(2).padStart(32, '0');
+
+    const maxPixels = Math.min(32, Math.floor(data.length / channels));
+
+    for (let i = 0; i < maxPixels; i++) {
+      const idx = i * channels + blueIdx;
+      data[idx] = (data[idx] & 0xFE) | parseInt(hashBits[i], 10);
+    }
+
+    const outputBuffer = await sharp(data, {
+      raw: { width: info.width, height: info.height, channels: channels },
+    }).png().toBuffer();
+
+    return outputBuffer;
+  } catch {
+    return buffer;
+  }
+}
+
+function checkLoreCache(hash) {
+  if (!hash) return null;
+  return lorekeeperCache.get(hash) || null;
+}
+
+function setLoreCache(hash, result) {
+  if (!hash) return;
+  if (lorekeeperCache.size >= LOREKEEPER_CACHE_MAX) {
+    const firstKey = lorekeeperCache.keys().next().value;
+    lorekeeperCache.delete(firstKey);
+  }
+  lorekeeperCache.set(hash, result);
+}
+
+async function createNoiseTile() {
+  const size = 128;
+  const channels = 4;
+  const data = Buffer.alloc(size * size * channels);
+
+  for (let i = 0; i < size * size; i++) {
+    const noise = Math.floor(Math.random() * 256);
+    data[i * channels] = noise;
+    data[i * channels + 1] = noise;
+    data[i * channels + 2] = noise;
+    data[i * channels + 3] = 6;
+  }
+
+  return sharp(data, {
+    raw: { width: size, height: size, channels: channels },
+  }).png().toBuffer();
+}
+
+async function detectAlphaStrippable(buffer, metadata) {
+  if (!metadata.hasAlpha) return false;
+
+  try {
+    const sampleSize = 64;
+    const { data, info } = await sharp(buffer)
+      .resize(sampleSize, sampleSize, { fit: 'inside' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+    const alphaIdx = channels - 1;
+    let minAlpha = 255;
+
+    for (let i = alphaIdx; i < data.length; i += channels) {
+      if (data[i] < minAlpha) {
+        minAlpha = data[i];
+        if (minAlpha < 255) return false;
+      }
+    }
+
+    return minAlpha === 255;
+  } catch {
+    return false;
+  }
+}
+
+function verifyOutput(buffer, format) {
+  if (!buffer || buffer.length < 100) return false;
+
+  switch (format) {
+    case 'jpeg':
+      return buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+    case 'png':
+      return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+    case 'webp':
+      return buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+             buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50;
+    case 'avif':
+      return buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70;
+    default:
+      return true;
+  }
+}
+
+// --- FEATURE 3: THE FORMAT DUELIST ---
+async function formatDuel(buffer, targetQuality) {
+  try {
+    const sample = await sharp(buffer)
+      .resize(256, 256, { fit: 'inside', withoutEnlargement: true })
+      .toBuffer();
+
+    const avifSample = await sharp(sample)
+      .avif({ quality: Math.min(targetQuality, 63), effort: 2 })
+      .toBuffer();
+
+    const webpSample = await sharp(sample)
+      .webp({ quality: targetQuality, effort: 2 })
+      .toBuffer();
+
+    if (avifSample.length <= webpSample.length) {
+      return { winner: 'avif', avifSize: avifSample.length, webpSize: webpSample.length };
+    } else {
+      return { winner: 'webp', avifSize: avifSample.length, webpSize: webpSample.length };
+    }
+  } catch {
+    return { winner: 'avif', avifSize: 0, webpSize: 0 };
   }
 }
 
@@ -247,10 +521,12 @@ async function detectImageType(buffer, metadata) {
   let colorVariance = 0;
   let meanLuminance = 128;
   let stdevLuminance = 50;
+  let maxLuminance = 255;
 
   if (channels && channels.length > 0) {
     meanLuminance = channels[0].mean || 128;
     stdevLuminance = channels[0].stdev || 50;
+    maxLuminance = channels[0].max || 255;
 
     for (const ch of channels) {
       totalEntropy += ch.entropy || 0;
@@ -289,6 +565,7 @@ async function detectImageType(buffer, metadata) {
     aspectRatio,
     meanLuminance,
     stdevLuminance,
+    maxLuminance,
   };
 }
 
@@ -326,6 +603,37 @@ export default async function compress(req, res, buffer) {
       return buffer;
     }
 
+    let thumbResult = null;
+    if (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) {
+      thumbResult = await generatePlaceholderAndPalette(buffer);
+
+      if (ENABLE_VOID_WATCHER && thumbResult.isVoid) {
+        res.setHeader('X-Void', 'TRUE');
+        res.setHeader('Content-Type', `image/${format}`);
+        return buffer;
+      }
+    }
+
+    let loreHash = null;
+    let loreHit = false;
+    if (ENABLE_LOREKEEPER && format === 'png') {
+      loreHash = await readLoreSignature(buffer);
+      if (loreHash) {
+        const loreCached = checkLoreCache(loreHash);
+        if (loreCached) {
+          loreHit = true;
+          res.setHeader('X-Lorekeeper', 'HIT');
+          res.setHeader('Content-Type', loreCached.contentType);
+          if (loreCached.placeholder) res.setHeader('X-Placeholder', loreCached.placeholder);
+          if (loreCached.grade) res.setHeader('X-Quality-Grade', loreCached.grade);
+          if (loreCached.palette && loreCached.palette.length > 0) {
+            res.setHeader('X-Palette', loreCached.palette.join(','));
+          }
+          return loreCached.buffer;
+        }
+      }
+    }
+
     const pHash = await generatePerceptualHash(buffer);
     const cachedResult = checkPerceptualCache(pHash);
 
@@ -334,15 +642,28 @@ export default async function compress(req, res, buffer) {
       res.setHeader('Content-Type', cachedResult.contentType);
       if (cachedResult.placeholder) res.setHeader('X-Placeholder', cachedResult.placeholder);
       if (cachedResult.grade) res.setHeader('X-Quality-Grade', cachedResult.grade);
+      if (cachedResult.palette && cachedResult.palette.length > 0) {
+        res.setHeader('X-Palette', cachedResult.palette.join(','));
+      }
       return cachedResult.buffer;
     }
 
     const analysis = await detectImageType(buffer, metadata);
     const viewportMaxDim = getViewportMaxDim(req);
 
-    let placeholder = null;
-    if (ENABLE_PLACEHOLDER) {
-      placeholder = await generatePlaceholder(buffer);
+    let placeholder = thumbResult ? thumbResult.placeholder : null;
+    let palette = thumbResult ? thumbResult.palette : [];
+
+    if (ENABLE_PALETTE && palette.length > 0) {
+      res.setHeader('X-Palette', palette.join(','));
+    }
+
+    let skewAngle = 0;
+    if (ENABLE_DESKEW && !analysis.isMangaStrip) {
+      skewAngle = await detectSkew(buffer);
+      if (skewAngle !== 0) {
+        res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
+      }
     }
 
     let judgeResult = null;
@@ -356,8 +677,17 @@ export default async function compress(req, res, buffer) {
     }
 
     let lineArtResult = null;
-    if (ENABLE_LINE_DENOISE) {
+    if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
       lineArtResult = await detectLineArt(buffer, analysis);
+    }
+
+    let alphaStrippable = false;
+    const isAnimated = metadata.pages > 1;
+    if (ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
+      alphaStrippable = await detectAlphaStrippable(buffer, metadata);
+      if (alphaStrippable) {
+        res.setHeader('X-Alpha-Sentinel', 'STRIPPED');
+      }
     }
 
     const requestedFormat = req.query.f || req.query.format;
@@ -371,9 +701,23 @@ export default async function compress(req, res, buffer) {
       outputFormat = 'webp';
     } else if (!requestedFormat) {
       const accept = req.headers.accept || '';
-      if (ENABLE_AVIF && accept.includes('image/avif')) {
+      const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
+      const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
+
+      // --- FEATURE 3: THE FORMAT DUELIST ---
+      if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
+        const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
+        let quality = calculateQuality(analysis, baseQuality);
+        if (judgeResult) {
+          quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
+        }
+
+        const duel = await formatDuel(buffer, quality);
+        outputFormat = duel.winner;
+        res.setHeader('X-Format-Duelist', `${duel.winner.toUpperCase()} (AVIF:${duel.avifSize} vs WebP:${duel.webpSize})`);
+      } else if (acceptsAvif) {
         outputFormat = 'avif';
-      } else if (ENABLE_WEBP && accept.includes('image/webp')) {
+      } else if (acceptsWebp) {
         outputFormat = 'webp';
       }
     } else if (requestedFormat === 'jpeg' || requestedFormat === 'jpg') {
@@ -389,12 +733,23 @@ export default async function compress(req, res, buffer) {
       quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
     }
 
-    const isAnimated = metadata.pages > 1;
     const frameCount = metadata.pages || 1;
 
     if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
       res.setHeader('X-Frame-Cap', 'TRUNCATED');
       return buffer;
+    }
+
+    let ditherAssassinActive = false;
+    if (ENABLE_DITHER_ASSASSIN && lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !isAnimated) {
+      ditherAssassinActive = true;
+    }
+
+    let bandingExorcistActive = false;
+    if (ENABLE_BANDING_EXORCIST && !ditherAssassinActive && !isAnimated) {
+      if (analysis.stdevLuminance > 20 && analysis.stdevLuminance < 50 && analysis.sharpness < 30) {
+        bandingExorcistActive = true;
+      }
     }
 
     let pipeline = sharp(buffer, {
@@ -412,7 +767,7 @@ export default async function compress(req, res, buffer) {
       pipeline = pipeline.grayscale();
     }
 
-    if (ENABLE_LUMINANCE && !isAnimated) {
+    if (ENABLE_LUMINANCE && !isAnimated && !ditherAssassinActive) {
       if (analysis.meanLuminance < 85 && analysis.stdevLuminance < 50) {
         pipeline = pipeline.gamma(1.4);
         res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
@@ -422,12 +777,27 @@ export default async function compress(req, res, buffer) {
       }
     }
 
+    // --- FEATURE 2: THE GHOST STRIPPER (White-Point Normalization) ---
+    if (ENABLE_GHOST_STRIPPER && !isAnimated && !ditherAssassinActive) {
+      if (analysis.meanLuminance > 150 && analysis.maxLuminance > 200 && analysis.maxLuminance < 253) {
+        const stretch = 255 / analysis.maxLuminance;
+        pipeline = pipeline.linear(stretch, 0);
+        res.setHeader('X-Ghost-Stripper', `STRETCHED (max:${analysis.maxLuminance} -> 255)`);
+      }
+    }
+
+    if (ENABLE_DESKEW && skewAngle !== 0) {
+      pipeline = pipeline.rotate(skewAngle, {
+        background: analysis.isGrayscale ? { r: 255, g: 255, b: 255 } : { r: 255, g: 255, b: 255, alpha: 0 },
+      });
+    }
+
     if (halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
       pipeline = pipeline.median(3);
       res.setHeader('X-Moire-Removed', 'true');
     }
 
-    if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) {
+    if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !ditherAssassinActive) {
       pipeline = pipeline.median(3);
       pipeline = pipeline.sharpen({
         sigma: 0.6,
@@ -454,6 +824,30 @@ export default async function compress(req, res, buffer) {
       }
     }
 
+    if (ENABLE_LAYOUT_PROPHET) {
+      let outW = origW;
+      let outH = origH;
+
+      if (targetWidth && targetHeight) {
+        outW = targetWidth;
+        outH = targetHeight;
+      } else if (targetWidth) {
+        outW = targetWidth;
+        outH = Math.round(origH * (targetWidth / origW));
+      } else if (targetHeight) {
+        outH = targetHeight;
+        outW = Math.round(origW * (targetHeight / origH));
+      }
+
+      const aspectRatio = (outW / outH).toFixed(4);
+      const orientation = outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square';
+
+      res.setHeader('X-Output-Width', String(outW));
+      res.setHeader('X-Output-Height', String(outH));
+      res.setHeader('X-Aspect-Ratio', aspectRatio);
+      res.setHeader('X-Orientation', orientation);
+    }
+
     if (targetWidth || targetHeight) {
       pipeline = pipeline.resize(targetWidth, targetHeight, {
         fit: 'inside',
@@ -462,7 +856,7 @@ export default async function compress(req, res, buffer) {
       });
     }
 
-    if (analysis.sharpness < 50 && !analysis.isMangaStrip) {
+    if (analysis.sharpness < 50 && !analysis.isMangaStrip && !ditherAssassinActive) {
       const alreadySharpened = lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85;
       if (!alreadySharpened) {
         pipeline = pipeline.sharpen({
@@ -473,56 +867,90 @@ export default async function compress(req, res, buffer) {
       }
     }
 
-    if (STRIP_ALPHA && outputFormat === 'jpeg') {
+    if (alphaStrippable) {
+      pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+    } else if (STRIP_ALPHA && outputFormat === 'jpeg' && !ditherAssassinActive) {
       pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
     }
 
-    const chromaSubsampling = getChromaSubsampling(analysis);
+    if (bandingExorcistActive) {
+      const noiseTile = await createNoiseTile();
+      pipeline = pipeline.composite([{
+        input: noiseTile,
+        tile: true,
+        blend: 'over',
+      }]);
+      res.setHeader('X-Banding-Exorcist', 'ACTIVE');
+    }
 
     let outputBuffer;
     let contentType;
 
-    switch (outputFormat) {
-      case 'avif':
-        outputBuffer = await pipeline.avif({
-          quality: Math.min(quality, 63),
-          effort: 4,
-          chromaSubsampling: chromaSubsampling,
-        }).toBuffer();
-        contentType = 'image/avif';
-        break;
+    if (ditherAssassinActive) {
+      pipeline = pipeline.threshold(128);
 
-      case 'webp':
-        outputBuffer = await pipeline.webp({
-          quality: quality,
-          effort: 4,
-          smartSubsample: true,
-        }).toBuffer();
-        contentType = 'image/webp';
-        break;
+      outputBuffer = await pipeline.png({
+        palette: true,
+        colours: 2,
+        compressionLevel: 9,
+        dither: 0,
+      }).toBuffer();
+      contentType = 'image/png';
+      res.setHeader('X-Dither-Assassin', 'ACTIVE');
+    } else {
+      const chromaSubsampling = getChromaSubsampling(analysis);
 
-      case 'png':
-        outputBuffer = await pipeline.png({
-          compressionLevel: 8,
-          palette: analysis.isGrayscale,
-          quality: quality,
-        }).toBuffer();
-        contentType = 'image/png';
-        break;
+      switch (outputFormat) {
+        case 'avif':
+          outputBuffer = await pipeline.avif({
+            quality: Math.min(quality, 63),
+            effort: 4,
+            chromaSubsampling: chromaSubsampling,
+          }).toBuffer();
+          contentType = 'image/avif';
+          break;
 
-      case 'jpeg':
-      default:
-        outputBuffer = await pipeline.jpeg({
-          quality: quality,
-          progressive: true,
-          mozjpeg: true,
-          chromaSubsampling: chromaSubsampling,
-          trellisQuantisation: true,
-          overshootDeringing: true,
-          optimiseScans: true,
-        }).toBuffer();
-        contentType = 'image/jpeg';
-        break;
+        case 'webp':
+          outputBuffer = await pipeline.webp({
+            quality: quality,
+            effort: 4,
+            smartSubsample: true,
+          }).toBuffer();
+          contentType = 'image/webp';
+          break;
+
+        case 'png':
+          outputBuffer = await pipeline.png({
+            compressionLevel: 8,
+            palette: analysis.isGrayscale,
+            quality: quality,
+          }).toBuffer();
+          contentType = 'image/png';
+          break;
+
+        case 'jpeg':
+        default:
+          outputBuffer = await pipeline.jpeg({
+            quality: quality,
+            progressive: true,
+            mozjpeg: true,
+            chromaSubsampling: chromaSubsampling,
+            trellisQuantisation: true,
+            overshootDeringing: true,
+            optimiseScans: true,
+          }).toBuffer();
+          contentType = 'image/jpeg';
+          break;
+      }
+    }
+
+    if (ENABLE_ENCODING_VERIFIER) {
+      if (!verifyOutput(outputBuffer, outputFormat)) {
+        res.setHeader('X-Encoding-Verifier', 'FAILED');
+        res.status(404);
+        return Buffer.alloc(0);
+      }
+      res.setHeader('X-Encoding-Verifier', 'PASSED');
     }
 
     if (outputBuffer.length >= buffer.length) {
@@ -530,7 +958,21 @@ export default async function compress(req, res, buffer) {
       res.setHeader('Content-Type', `image/${format}`);
       if (placeholder) res.setHeader('X-Placeholder', placeholder);
       if (judgeResult) res.setHeader('X-Quality-Grade', judgeResult.grade);
+      if (palette.length > 0) res.setHeader('X-Palette', palette.join(','));
       return buffer;
+    }
+
+    if (ENABLE_LOREKEEPER && outputFormat === 'png' && !loreHit && !ditherAssassinActive) {
+      const newLoreHash = generateLoreHash(buffer);
+      outputBuffer = await embedLoreSignature(outputBuffer, newLoreHash);
+      setLoreCache(newLoreHash, {
+        buffer: outputBuffer,
+        contentType: contentType,
+        placeholder: placeholder,
+        grade: judgeResult ? judgeResult.grade : null,
+        palette: palette,
+      });
+      res.setHeader('X-Lorekeeper', 'EMBEDDED');
     }
 
     setPerceptualCache(pHash, {
@@ -538,6 +980,7 @@ export default async function compress(req, res, buffer) {
       contentType: contentType,
       placeholder: placeholder,
       grade: judgeResult ? judgeResult.grade : null,
+      palette: palette,
     });
 
     res.setHeader('X-Perceptual-Cache', 'MISS');
