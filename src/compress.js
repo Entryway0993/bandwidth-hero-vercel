@@ -30,6 +30,9 @@ const WEBP_EFFORT = envInt('WEBP_EFFORT', 4);
 const SHARPEN_MODE = String(process.env.SHARPEN_MODE || 'resized').toLowerCase();
 const SHARPEN_SIGMA = envFloat('SHARPEN_SIGMA', 0.8);
 
+const MIN_QUALITY = envInt('MIN_QUALITY', 10, 1, 100);
+const MAX_QUALITY = envInt('MAX_QUALITY', 100, 10, 100);
+
 function sendOriginal(req, res, inputBuffer) {
   try {
     if (!res.headersSent && !res.writableEnded) {
@@ -43,9 +46,7 @@ function sendOriginal(req, res, inputBuffer) {
   } catch {
     try {
       if (!res.writableEnded) res.end();
-    } catch {
-      // Connection already dead.
-    }
+    } catch {}
   }
 }
 
@@ -60,7 +61,7 @@ async function compress(req, res, inputBuffer) {
     format = 'webp';
   }
 
-  const quality = req.opts?.quality ?? 40;
+  const baseQuality = req.opts?.quality ?? 40;
   const grayscale = req.opts?.grayscale ?? false;
   const maxOutputDim = Number(req.opts?.maxDim) || 0;
   const maxStripWidth = Number(req.opts?.maxStripWidth) || 0;
@@ -88,21 +89,16 @@ async function compress(req, res, inputBuffer) {
     let outHeight = metadata.height || 0;
     const orientation = metadata.orientation || 1;
 
+    // Swap dimensions for EXIF orientation 5-8
     if (!animated && orientation >= 5 && orientation <= 8) {
       const tmp = outWidth;
       outWidth = outHeight;
       outHeight = tmp;
     }
 
-    // 🛑 DYNAMIC ANIMATED FRAME BOMB CAP.
-    // "Maximum allowed" is dictated by your 1024MB RAM limit.
-    // We reserve ~324MB for Node.js, Sharp, and the final encoding buffer.
-    // The remaining ~700MB is divided by the raw pixel size of one frame.
     const MAX_RAM_FOR_FRAMES = 700 * 1024 * 1024; 
     const pixelsPerFrame = Math.max(1, outWidth * outHeight);
     const dynamicFrameCap = Math.floor(MAX_RAM_FOR_FRAMES / (pixelsPerFrame * 4));
-    
-    // Absolute ceiling: 1000 frames. Even if you have the RAM, the 60s timeout will kill you.
     const safeFrameCap = Math.max(1, Math.min(dynamicFrameCap, 1000));
 
     if (animated && frameCount > safeFrameCap) {
@@ -113,6 +109,8 @@ async function compress(req, res, inputBuffer) {
     const totalPixels = outWidth * outHeight;
     const isLongStrip = outHeight > outWidth * 3;
 
+    // 🛑 AUTOMATIC EXIF ROTATION
+    // Reads the hidden tag, rotates the pixels, and deletes the tag.
     if (!animated && orientation > 1) {
       instance.rotate();
     }
@@ -123,30 +121,16 @@ async function compress(req, res, inputBuffer) {
     if (!animated) {
       if (isLongStrip) {
         if (maxStripWidth > 0 && outWidth > maxStripWidth) {
-          instance.resize({
-            width: maxStripWidth,
-            withoutEnlargement: true,
-            kernel: 'lanczos3'
-          });
+          instance.resize({ width: maxStripWidth, withoutEnlargement: true, kernel: 'lanczos3' });
           estimatedPixels = Math.round(totalPixels * (maxStripWidth / outWidth));
           didResize = true;
         }
       } else if (maxOutputDim > 0 && originalMaxDim > maxOutputDim) {
-        instance.resize({
-          width: maxOutputDim,
-          height: maxOutputDim,
-          fit: 'inside',
-          withoutEnlargement: true,
-          kernel: 'lanczos3'
-        });
+        instance.resize({ width: maxOutputDim, height: maxOutputDim, fit: 'inside', withoutEnlargement: true, kernel: 'lanczos3' });
         const scale = maxOutputDim / originalMaxDim;
         estimatedPixels = Math.round(totalPixels * scale * scale);
         didResize = true;
       }
-    }
-
-    if (grayscale) {
-      instance.grayscale();
     }
 
     let shouldSharpen = false;
@@ -162,10 +146,42 @@ async function compress(req, res, inputBuffer) {
       instance.sharpen({ sigma: SHARPEN_SIGMA });
     }
 
-    // 🛑 SURGICAL FIX: Transparent PNG -> White JPEG Safety.
+    // 🛑 SMART GRAYSCALE DETECTION
+    let skipGrayscaleConversion = false;
+    if (grayscale && !animated) {
+      const isAlreadyGrayscale = metadata.channels === 1 || metadata.space === 'b-w' || metadata.space === 'gray';
+      
+      if (isAlreadyGrayscale) {
+        skipGrayscaleConversion = true;
+      } else if (metadata.channels >= 3) {
+        try {
+          const thumbStats = await sharp(inputBuffer).resize(50, 50, { fit: 'inside' }).stats();
+          const r = thumbStats.channels[0].mean;
+          const g = thumbStats.channels[1].mean;
+          const b = thumbStats.channels[2].mean;
+          const maxDiff = Math.max(Math.abs(r - g), Math.abs(g - b), Math.abs(r - b));
+          if (maxDiff < 3.0) skipGrayscaleConversion = true;
+        } catch {}
+      }
+    }
+
+    if (grayscale && !skipGrayscaleConversion) {
+      instance.grayscale();
+    }
+
     const needsFlatten = !animated && metadata.hasAlpha && format === 'jpeg';
     if (needsFlatten) {
       instance.flatten({ background: { r: 255, g: 255, b: 255 } });
+    }
+
+    const megapixels = estimatedPixels / 1_000_000;
+    let dynamicQuality = baseQuality;
+    if (!animated) {
+      if (megapixels < 1) {
+        dynamicQuality = Math.min(baseQuality + 20, MAX_QUALITY);
+      } else if (megapixels > 4) {
+        dynamicQuality = Math.max(baseQuality - 10, MIN_QUALITY);
+      }
     }
 
     let effectiveMaxDim = originalMaxDim;
@@ -180,7 +196,7 @@ async function compress(req, res, inputBuffer) {
     if (animated) {
       res.setHeader('Content-Type', 'image/webp');
       await pipeline(
-        instance.webp({ quality, effort: WEBP_EFFORT, smartSubsample: true, animated: true }),
+        instance.webp({ quality: baseQuality, effort: WEBP_EFFORT, smartSubsample: true, animated: true }),
         res
       );
       return;
@@ -193,7 +209,7 @@ async function compress(req, res, inputBuffer) {
       else if (estimatedPixels < MID_PIXEL_LINE) effort = AVIF_EFFORT_MEDIUM;
 
       await pipeline(
-        instance.avif({ quality, effort, chromaSubsampling: '4:2:0' }),
+        instance.avif({ quality: dynamicQuality, effort, chromaSubsampling: '4:2:0' }),
         res
       );
       return;
@@ -202,7 +218,7 @@ async function compress(req, res, inputBuffer) {
     if (format === 'webp' && effectiveMaxDim <= MAX_CODEC_DIM) {
       res.setHeader('Content-Type', 'image/webp');
       await pipeline(
-        instance.webp({ quality, effort: WEBP_EFFORT, smartSubsample: true }),
+        instance.webp({ quality: dynamicQuality, effort: WEBP_EFFORT, smartSubsample: true }),
         res
       );
       return;
@@ -210,7 +226,7 @@ async function compress(req, res, inputBuffer) {
 
     res.setHeader('Content-Type', 'image/jpeg');
     await pipeline(
-      instance.jpeg({ quality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' }),
+      instance.jpeg({ quality: dynamicQuality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' }),
       res
     );
   } catch {
