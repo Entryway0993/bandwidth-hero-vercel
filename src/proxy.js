@@ -22,9 +22,20 @@ const chromeCipherAgent = new Agent({
   maxVersion: 'TLSv1.3'
 });
 
-// 🛑 THE GHOST PLACEHOLDER
-// Generate a tiny 200x200 dark gray WebP on startup. 
-// Returned when upstream images are dead, blocked, or timed out.
+// 🛑 THE CHAMELEON CLOAK (User-Agent Rotation)
+const UA_POOL = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Linux; Android 15; SM-A736B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0'
+];
+
+function getRandomUA() {
+  return UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+}
+
 const GHOST_WEBP = await sharp({
   create: { width: 200, height: 200, channels: 3, background: { r: 35, g: 35, b: 40 } }
 }).webp({ quality: 10, effort: 1 }).toBuffer();
@@ -89,8 +100,11 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
+  const referer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
+
   const headers = {
-    'user-agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    // 🛑 THE CHAMELEON CLOAK
+    'user-agent': userAgent || getRandomUA(),
     accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     'accept-encoding': UPSTREAM_ACCEPT_ENCODING,
     'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
@@ -99,7 +113,8 @@ export default async function proxy(req, res) {
     'sec-fetch-site': 'cross-site',
     'sec-ch-ua': '"Chromium";v="148", "Not;A=Brand";v="24", "Google Chrome";v="148"',
     'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"'
+    'sec-ch-ua-platform': '"Windows"',
+    ...(referer && typeof referer === 'string' ? { referer } : {})
   };
 
   const config = {
@@ -171,17 +186,16 @@ export default async function proxy(req, res) {
       return sendGhost(res, 3600);
     }
 
-    // 🛑 GHOST PROTOCOL: Upstream Dead or Blocked
     if (statusCode === 404 || statusCode === 410) {
-      return sendGhost(res, 86400); // Cache "Not Found" for 1 day
+      return sendGhost(res, 86400);
     }
     
     if (statusCode === 403) {
-      return sendGhost(res, 3600); // Cache "Forbidden" for 1 hour
+      return sendGhost(res, 3600);
     }
 
     if (statusCode < 200 || statusCode >= 300) {
-      return sendGhost(res, 60); // Short cache for other random upstream errors
+      return sendGhost(res, 60);
     }
 
     const detectedType = detectContentType(rawBody);
@@ -220,7 +234,7 @@ export default async function proxy(req, res) {
     }
 
     if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
-      return sendGhost(res, 60); // Short cache for timeouts
+      return sendGhost(res, 60);
     }
 
     return sendGhost(res, 60);
