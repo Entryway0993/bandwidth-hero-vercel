@@ -110,9 +110,15 @@ async function compress(req, res, inputBuffer) {
     const isLongStrip = outHeight > outWidth * 3;
 
     // 🛑 AUTOMATIC EXIF ROTATION
-    // Reads the hidden tag, rotates the pixels, and deletes the tag.
     if (!animated && orientation > 1) {
       instance.rotate();
+    }
+
+    // 🛑 THE CMYK EXORCIST
+    // Force the color space to sRGB and strip embedded ICC profiles.
+    // This fixes radioactive/neon colors on mobile screens.
+    if (!animated) {
+      instance.toColorspace('srgb');
     }
 
     let estimatedPixels = totalPixels;
