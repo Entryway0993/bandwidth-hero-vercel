@@ -50,6 +50,22 @@ function sendOriginal(req, res, inputBuffer) {
   }
 }
 
+// 🛑 THE VECTOR EXORCIST (SVG Sanitization)
+function sanitizeSvg(buffer) {
+  try {
+    let svgStr = buffer.toString('utf8');
+    // Remove <script> tags
+    svgStr = svgStr.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+    // Remove on* attributes (e.g., onload="...", onclick="...")
+    svgStr = svgStr.replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    // Remove javascript: protocol
+    svgStr = svgStr.replace(/javascript:/gi, '');
+    return Buffer.from(svgStr, 'utf8');
+  } catch {
+    return buffer;
+  }
+}
+
 async function compress(req, res, inputBuffer) {
   let format = req.opts?.format;
 
@@ -71,8 +87,14 @@ async function compress(req, res, inputBuffer) {
   if (sharpenQuery === '1' || sharpenQuery === 'true' || sharpenQuery === 'on') sharpenOverride = true;
   if (sharpenQuery === '0' || sharpenQuery === 'false' || sharpenQuery === 'off') sharpenOverride = false;
 
+  // 🛑 THE VECTOR EXORCIST (Sanitize SVGs before processing)
+  let safeBuffer = inputBuffer;
+  if (req.opts.originType === 'image/svg+xml') {
+    safeBuffer = sanitizeSvg(inputBuffer);
+  }
+
   try {
-    const instance = sharp(inputBuffer, {
+    const instance = sharp(safeBuffer, {
       animated: true,
       limitInputPixels: SHARP_PIXEL_LIMIT
     });
@@ -115,26 +137,31 @@ async function compress(req, res, inputBuffer) {
     }
 
     // 🛑 THE CMYK EXORCIST
-    // Force the color space to sRGB and strip embedded ICC profiles.
-    // This fixes radioactive/neon colors on mobile screens.
     if (!animated) {
       instance.toColorspace('srgb');
     }
 
+    // 🛑 THE MOIRÉ EXORCIST (Halftone Descreening)
+    if (!animated && (outWidth > 2000 || outHeight > 2000)) {
+      instance.median(1);
+    }
+
     let estimatedPixels = totalPixels;
     let didResize = false;
+    let resizeScale = 1;
 
     if (!animated) {
       if (isLongStrip) {
         if (maxStripWidth > 0 && outWidth > maxStripWidth) {
           instance.resize({ width: maxStripWidth, withoutEnlargement: true, kernel: 'lanczos3' });
-          estimatedPixels = Math.round(totalPixels * (maxStripWidth / outWidth));
+          resizeScale = maxStripWidth / outWidth;
+          estimatedPixels = Math.round(totalPixels * resizeScale * resizeScale);
           didResize = true;
         }
       } else if (maxOutputDim > 0 && originalMaxDim > maxOutputDim) {
         instance.resize({ width: maxOutputDim, height: maxOutputDim, fit: 'inside', withoutEnlargement: true, kernel: 'lanczos3' });
-        const scale = maxOutputDim / originalMaxDim;
-        estimatedPixels = Math.round(totalPixels * scale * scale);
+        resizeScale = maxOutputDim / originalMaxDim;
+        estimatedPixels = Math.round(totalPixels * resizeScale * resizeScale);
         didResize = true;
       }
     }
@@ -149,7 +176,12 @@ async function compress(req, res, inputBuffer) {
     }
 
     if (!animated && shouldSharpen) {
-      instance.sharpen({ sigma: SHARPEN_SIGMA });
+      // 🛑 THE SMART SHARPEN RADIUS
+      let sigma = SHARPEN_SIGMA;
+      if (didResize && resizeScale < 1) {
+        sigma = Math.min(Math.max(SHARPEN_SIGMA / resizeScale, 0.5), 2.5);
+      }
+      instance.sharpen({ sigma });
     }
 
     // 🛑 SMART GRAYSCALE DETECTION
@@ -161,7 +193,7 @@ async function compress(req, res, inputBuffer) {
         skipGrayscaleConversion = true;
       } else if (metadata.channels >= 3) {
         try {
-          const thumbStats = await sharp(inputBuffer).resize(50, 50, { fit: 'inside' }).stats();
+          const thumbStats = await sharp(safeBuffer).resize(50, 50, { fit: 'inside' }).stats();
           const r = thumbStats.channels[0].mean;
           const g = thumbStats.channels[1].mean;
           const b = thumbStats.channels[2].mean;
@@ -175,20 +207,57 @@ async function compress(req, res, inputBuffer) {
       instance.grayscale();
     }
 
+    // 🛑 THE CHROMA GUILLOTINE (Dynamic Subsampling)
+    let chromaSubsampling = '4:2:0';
+    if (!animated && metadata.channels >= 3) {
+      try {
+        const chromaStats = await sharp(safeBuffer).stats();
+        if (chromaStats.channels.length >= 3) {
+          const rStdev = chromaStats.channels[0].stdev;
+          const gStdev = chromaStats.channels[1].stdev;
+          const bStdev = chromaStats.channels[2].stdev;
+          const maxStdev = Math.max(rStdev, gStdev, bStdev);
+          
+          // High color variance suggests text/graphics that need full color resolution
+          if (maxStdev > 50) {
+            chromaSubsampling = '4:4:4';
+          }
+        }
+      } catch {}
+    }
+
     const needsFlatten = !animated && metadata.hasAlpha && format === 'jpeg';
     if (needsFlatten) {
       instance.flatten({ background: { r: 255, g: 255, b: 255 } });
     }
 
+    // 🛑 THE ENTROPY GUILLOTINE (Complexity-Based Quality)
+    let entropyAdjustment = 0;
+    if (!animated) {
+      try {
+        const entropyStats = await sharp(safeBuffer).stats();
+        const avgStdev = entropyStats.channels.reduce((sum, ch) => sum + ch.stdev, 0) / entropyStats.channels.length;
+        
+        // Simple image (mostly white/blank): reduce quality
+        // Complex image (detailed/noisy): increase quality
+        if (avgStdev < 30) {
+          entropyAdjustment = -20;
+        } else if (avgStdev > 60) {
+          entropyAdjustment = 15;
+        }
+      } catch {}
+    }
+
     const megapixels = estimatedPixels / 1_000_000;
-    let dynamicQuality = baseQuality;
+    let dynamicQuality = baseQuality + entropyAdjustment;
     if (!animated) {
       if (megapixels < 1) {
-        dynamicQuality = Math.min(baseQuality + 20, MAX_QUALITY);
+        dynamicQuality += 20;
       } else if (megapixels > 4) {
-        dynamicQuality = Math.max(baseQuality - 10, MIN_QUALITY);
+        dynamicQuality -= 10;
       }
     }
+    dynamicQuality = Math.max(MIN_QUALITY, Math.min(dynamicQuality, MAX_QUALITY));
 
     let effectiveMaxDim = originalMaxDim;
     if (!animated) {
@@ -208,33 +277,51 @@ async function compress(req, res, inputBuffer) {
       return;
     }
 
-    if (format === 'avif' && effectiveMaxDim <= MAX_CODEC_DIM) {
-      res.setHeader('Content-Type', 'image/avif');
-      let effort = AVIF_EFFORT_LARGE;
-      if (estimatedPixels < SMALL_PIXEL_LINE) effort = AVIF_EFFORT_SMALL;
-      else if (estimatedPixels < MID_PIXEL_LINE) effort = AVIF_EFFORT_MEDIUM;
+    // 🛑 THE PANIC ENCODER (JPEG Last Resort)
+    try {
+      if (format === 'avif' && effectiveMaxDim <= MAX_CODEC_DIM) {
+        res.setHeader('Content-Type', 'image/avif');
+        let effort = AVIF_EFFORT_LARGE;
+        if (estimatedPixels < SMALL_PIXEL_LINE) effort = AVIF_EFFORT_SMALL;
+        else if (estimatedPixels < MID_PIXEL_LINE) effort = AVIF_EFFORT_MEDIUM;
 
+        await pipeline(
+          instance.avif({ quality: dynamicQuality, effort, chromaSubsampling }),
+          res
+        );
+        return;
+      }
+
+      if (format === 'webp' && effectiveMaxDim <= MAX_CODEC_DIM) {
+        res.setHeader('Content-Type', 'image/webp');
+        await pipeline(
+          instance.webp({ quality: dynamicQuality, effort: WEBP_EFFORT, smartSubsample: true }),
+          res
+        );
+        return;
+      }
+
+      res.setHeader('Content-Type', 'image/jpeg');
       await pipeline(
-        instance.avif({ quality: dynamicQuality, effort, chromaSubsampling: '4:2:0' }),
+        instance.jpeg({ quality: dynamicQuality, progressive: true, mozjpeg: true, chromaSubsampling }),
         res
       );
-      return;
+    } catch (encodeError) {
+      // If AVIF/WebP encoding fails, fall back to JPEG instead of sending the raw original
+      if (!res.headersSent) {
+        try {
+          res.setHeader('Content-Type', 'image/jpeg');
+          await pipeline(
+            instance.jpeg({ quality: dynamicQuality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' }),
+            res
+          );
+          return;
+        } catch {
+          // If JPEG also fails, fall through to sendOriginal
+        }
+      }
+      sendOriginal(req, res, inputBuffer);
     }
-
-    if (format === 'webp' && effectiveMaxDim <= MAX_CODEC_DIM) {
-      res.setHeader('Content-Type', 'image/webp');
-      await pipeline(
-        instance.webp({ quality: dynamicQuality, effort: WEBP_EFFORT, smartSubsample: true }),
-        res
-      );
-      return;
-    }
-
-    res.setHeader('Content-Type', 'image/jpeg');
-    await pipeline(
-      instance.jpeg({ quality: dynamicQuality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' }),
-      res
-    );
   } catch {
     sendOriginal(req, res, inputBuffer);
   }
