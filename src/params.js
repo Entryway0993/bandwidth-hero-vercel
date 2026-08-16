@@ -16,7 +16,6 @@ const DEFAULT_GRAYSCALE = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.DEFAULT_GRAYSCALE || process.env.DEFAULT_BW || '').trim().toLowerCase()
 );
 
-// 🛑 COMPATIBILITY MODE
 const ALLOW_ACCEPT_FALLBACK = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ALLOW_ACCEPT_FALLBACK || '').trim().toLowerCase()
 );
@@ -49,28 +48,21 @@ function parseQuality(q, defaultValue, min, max) {
 }
 
 function parseFormat(req) {
-  // Emergency escape hatch.
   if (parseBoolean(req.query.jpeg, false)) return 'jpeg';
-
-  // Explicit overrides.
   if (parseBoolean(req.query.avif, false)) return 'avif';
   if (parseBoolean(req.query.webp, false)) return 'webp';
 
-  // 🛑 ACCEPT HEADER NEGOTIATION
   if (ALLOW_ACCEPT_FALLBACK) {
     const accept = String(req.headers.accept || '').toLowerCase();
     
-    // If unspecified or wildcard, assume modern client.
     if (!accept || accept === '*/*' || accept.includes('*/*')) return 'avif';
     
     if (accept.includes('image/avif')) return 'avif';
     if (accept.includes('image/webp')) return 'webp';
     
-    // Ancient client fallback
     return 'jpeg';
   }
 
-  // Forced AVIF default.
   return 'avif';
 }
 
@@ -171,6 +163,35 @@ function params(req, res, next) {
         4096
       )
     };
+
+    // 🛑 THE PROFILE INJECTION
+    // The client sends one word. The proxy rewrites the physics.
+    const mode = String(req.query.mode || '').toLowerCase();
+
+    if (mode === 'manga' || mode === 'comic') {
+      // Standard manga pages. Cap side, force sharpen.
+      req.opts.maxDim = req.opts.maxDim || DEFAULT_MAX_OUTPUT_DIM;
+      req.opts.maxStripWidth = 0; // Disable strip logic
+      if (req.query.sharpen === undefined) req.query.sharpen = '1';
+      
+    } else if (mode === 'strip' || mode === 'webtoon' || mode === 'manhwa' || mode === 'manhua') {
+      // Long vertical strips. Disable side cap, cap width, force sharpen.
+      req.opts.maxDim = 0; 
+      req.opts.maxStripWidth = req.opts.maxStripWidth || DEFAULT_MAX_STRIP_WIDTH;
+      if (req.query.sharpen === undefined) req.query.sharpen = '1';
+      
+    } else if (mode === 'photo' || mode === 'normal') {
+      // Normal photos. Cap side, disable sharpen to save CPU.
+      req.opts.maxDim = req.opts.maxDim || DEFAULT_MAX_OUTPUT_DIM;
+      req.opts.maxStripWidth = 0;
+      if (req.query.sharpen === undefined) req.query.sharpen = '0';
+      
+    } else if (mode === 'raw' || mode === 'bypass') {
+      // No resizing. Pass straight to encoder.
+      req.opts.maxDim = 0;
+      req.opts.maxStripWidth = 0;
+      req.query.sharpen = '0';
+    }
 
     return next();
   } catch (err) {
