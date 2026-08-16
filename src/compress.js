@@ -1,330 +1,542 @@
-import { pipeline } from 'node:stream/promises';
 import sharp from 'sharp';
+import { createHash } from 'crypto';
 
-sharp.cache({ memory: 100, files: 0 });
-sharp.concurrency(1);
-sharp.simd(true);
+const MAX_OUTPUT_DIM = parseInt(process.env.MAX_OUTPUT_DIM) || 2048;
+const DEFAULT_QUALITY = parseInt(process.env.DEFAULT_QUALITY) || 75;
+const ANIME_QUALITY = parseInt(process.env.ANIME_QUALITY) || 80;
+const PHOTO_QUALITY = parseInt(process.env.PHOTO_QUALITY) || 70;
+const MAX_STRIP_WIDTH = parseInt(process.env.MAX_STRIP_WIDTH) || 1200;
+const MAX_ANIMATION_FRAMES = parseInt(process.env.MAX_ANIMATION_FRAMES) || 50;
+const VIEWPORT_FALLBACK = parseInt(process.env.VIEWPORT_FALLBACK) || 1080;
 
-const MAX_CODEC_DIM = 16383;
-const SHARP_PIXEL_LIMIT = 40_000_000;
-const SMALL_PIXEL_LINE = 3_000_000;
-const MID_PIXEL_LINE = 20_000_000;
+const perceptualCache = new Map();
+const PERCEPTUAL_CACHE_MAX = 500;
 
-function envInt(name, fallback, min = 0, max = 9) {
-  const n = parseInt(process.env[name], 10);
-  if (Number.isNaN(n)) return fallback;
-  return Math.min(Math.max(n, min), max);
+function envBool(name, fallback = false) {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  return v === '1' || v === 'true' || v === 'yes';
 }
 
-function envFloat(name, fallback, min = 0.1, max = 3.0) {
-  const n = parseFloat(process.env[name]);
-  if (Number.isNaN(n)) return fallback;
-  return Math.min(Math.max(n, min), max);
-}
+const ENABLE_AVIF = envBool('ENABLE_AVIF', true);
+const ENABLE_WEBP = envBool('ENABLE_WEBP', true);
+const FORCE_JPEG = envBool('FORCE_JPEG', false);
+const FORCE_GRAYSCALE = envBool('FORCE_GRAYSCALE', false);
+const STRIP_ALPHA = envBool('STRIP_ALPHA', true);
+const ENABLE_PLACEHOLDER = envBool('ENABLE_PLACEHOLDER', true);
+const ENABLE_JUDGE = envBool('ENABLE_JUDGE', true);
+const ENABLE_MOIRE = envBool('ENABLE_MOIRE', true);
+const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
 
-const AVIF_EFFORT_SMALL = envInt('AVIF_EFFORT_SMALL', 4);
-const AVIF_EFFORT_MEDIUM = envInt('AVIF_EFFORT_MEDIUM', 3);
-const AVIF_EFFORT_LARGE = envInt('AVIF_EFFORT_LARGE', 2);
-const WEBP_EFFORT = envInt('WEBP_EFFORT', 4);
-
-const SHARPEN_MODE = String(process.env.SHARPEN_MODE || 'resized').toLowerCase();
-const SHARPEN_SIGMA = envFloat('SHARPEN_SIGMA', 0.8);
-
-const MIN_QUALITY = envInt('MIN_QUALITY', 10, 1, 100);
-const MAX_QUALITY = envInt('MAX_QUALITY', 100, 10, 100);
-
-function sendOriginal(req, res, inputBuffer) {
+async function generatePerceptualHash(buffer) {
   try {
-    if (!res.headersSent && !res.writableEnded) {
-      const originType = req.opts?.originType || 'application/octet-stream';
-      res.setHeader('Content-Type', originType);
-      res.setHeader('Content-Length', inputBuffer.length);
-      res.status(200).end(inputBuffer);
-      return;
+    const { data } = await sharp(buffer)
+      .resize(8, 8, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    let hash = '';
+    const avg = data.reduce((sum, v) => sum + v, 0) / data.length;
+    for (let i = 0; i < data.length; i++) {
+      hash += data[i] > avg ? '1' : '0';
     }
-    if (!res.writableEnded) res.end();
+    return createHash('md5').update(hash).digest('hex');
   } catch {
-    try {
-      if (!res.writableEnded) res.end();
-    } catch {}
+    return null;
   }
 }
 
-// 🛑 THE VECTOR EXORCIST (SVG Sanitization)
-function sanitizeSvg(buffer) {
+function checkPerceptualCache(hash) {
+  if (!hash) return null;
+  return perceptualCache.get(hash) || null;
+}
+
+function setPerceptualCache(hash, result) {
+  if (!hash) return;
+  if (perceptualCache.size >= PERCEPTUAL_CACHE_MAX) {
+    const firstKey = perceptualCache.keys().next().value;
+    perceptualCache.delete(firstKey);
+  }
+  perceptualCache.set(hash, result);
+}
+
+async function generatePlaceholder(buffer) {
   try {
-    let svgStr = buffer.toString('utf8');
-    // Remove <script> tags
-    svgStr = svgStr.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-    // Remove on* attributes (e.g., onload="...", onclick="...")
-    svgStr = svgStr.replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-    // Remove javascript: protocol
-    svgStr = svgStr.replace(/javascript:/gi, '');
-    return Buffer.from(svgStr, 'utf8');
+    const thumb = await sharp(buffer)
+      .resize(32, 32, { fit: 'inside' })
+      .blur(2)
+      .grayscale()
+      .jpeg({ quality: 20 })
+      .toBuffer();
+    return 'data:image/jpeg;base64,' + thumb.toString('base64');
   } catch {
-    return buffer;
+    return null;
   }
 }
 
-async function compress(req, res, inputBuffer) {
-  let format = req.opts?.format;
+function judgeQuality(analysis, metadata) {
+  const sharpness = analysis.sharpness || 0;
+  const width = metadata.width || 0;
+  const height = metadata.height || 0;
+  const resolution = Math.max(width, height);
+  const entropy = analysis.entropy || 0;
 
-  if (!format) {
-    format = req.opts?.webp === false ? 'jpeg' : 'webp';
-  }
+  let score = 0;
 
-  if (!['avif', 'webp', 'jpeg'].includes(format)) {
-    format = 'webp';
-  }
+  if (sharpness > 80) score += 40;
+  else if (sharpness > 60) score += 32;
+  else if (sharpness > 40) score += 24;
+  else if (sharpness > 25) score += 16;
+  else if (sharpness > 15) score += 8;
 
-  const baseQuality = req.opts?.quality ?? 40;
-  const grayscale = req.opts?.grayscale ?? false;
-  const maxOutputDim = Number(req.opts?.maxDim) || 0;
-  const maxStripWidth = Number(req.opts?.maxStripWidth) || 0;
+  if (resolution > 2000) score += 30;
+  else if (resolution > 1500) score += 24;
+  else if (resolution > 1000) score += 18;
+  else if (resolution > 700) score += 12;
+  else if (resolution > 400) score += 6;
 
-  const sharpenQuery = req.query?.sharpen;
-  let sharpenOverride;
-  if (sharpenQuery === '1' || sharpenQuery === 'true' || sharpenQuery === 'on') sharpenOverride = true;
-  if (sharpenQuery === '0' || sharpenQuery === 'false' || sharpenQuery === 'off') sharpenOverride = false;
+  if (entropy > 5 && entropy < 7) score += 30;
+  else if (entropy > 4 && entropy < 8) score += 22;
+  else if (entropy > 3 && entropy < 8.5) score += 14;
+  else score += 6;
 
-  // 🛑 THE VECTOR EXORCIST (Sanitize SVGs before processing)
-  let safeBuffer = inputBuffer;
-  if (req.opts.originType === 'image/svg+xml') {
-    safeBuffer = sanitizeSvg(inputBuffer);
+  let grade, qualityAdjust;
+  if (score >= 85) { grade = 'S'; qualityAdjust = -10; }
+  else if (score >= 70) { grade = 'A'; qualityAdjust = -5; }
+  else if (score >= 55) { grade = 'B'; qualityAdjust = 0; }
+  else if (score >= 40) { grade = 'C'; qualityAdjust = 5; }
+  else if (score >= 25) { grade = 'D'; qualityAdjust = 10; }
+  else { grade = 'F'; qualityAdjust = 15; }
+
+  return { grade, qualityAdjust, score };
+}
+
+async function detectHalftone(buffer, metadata, analysis) {
+  if (analysis.colorVariance > 50) {
+    return { isHalftone: false, confidence: 0 };
   }
 
   try {
-    const instance = sharp(safeBuffer, {
-      animated: true,
-      limitInputPixels: SHARP_PIXEL_LIMIT
-    });
+    const width = metadata.width;
+    const height = metadata.height;
+    const sampleSize = Math.min(200, Math.min(width, height));
 
-    res.on('close', () => {
-      if (!res.writableEnded) instance.destroy?.();
-    });
-
-    const metadata = await instance.metadata();
-    const frameCount = metadata.pages || 1;
-    const animated = frameCount > 1;
-
-    let outWidth = metadata.width || 0;
-    let outHeight = metadata.height || 0;
-    const orientation = metadata.orientation || 1;
-
-    // Swap dimensions for EXIF orientation 5-8
-    if (!animated && orientation >= 5 && orientation <= 8) {
-      const tmp = outWidth;
-      outWidth = outHeight;
-      outHeight = tmp;
+    if (sampleSize < 32) {
+      return { isHalftone: false, confidence: 0 };
     }
 
-    const MAX_RAM_FOR_FRAMES = 700 * 1024 * 1024; 
-    const pixelsPerFrame = Math.max(1, outWidth * outHeight);
-    const dynamicFrameCap = Math.floor(MAX_RAM_FOR_FRAMES / (pixelsPerFrame * 4));
-    const safeFrameCap = Math.max(1, Math.min(dynamicFrameCap, 1000));
+    const left = Math.floor((width - sampleSize) / 2);
+    const top = Math.floor((height - sampleSize) / 2);
 
-    if (animated && frameCount > safeFrameCap) {
-      return sendOriginal(req, res, inputBuffer);
-    }
+    const { data } = await sharp(buffer)
+      .extract({ left, top, width: sampleSize, height: sampleSize })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
-    const originalMaxDim = Math.max(outWidth, outHeight);
-    const totalPixels = outWidth * outHeight;
-    const isLongStrip = outHeight > outWidth * 3;
-
-    // 🛑 AUTOMATIC EXIF ROTATION
-    if (!animated && orientation > 1) {
-      instance.rotate();
-    }
-
-    // 🛑 THE CMYK EXORCIST
-    if (!animated) {
-      instance.toColorspace('srgb');
-    }
-
-    // 🛑 THE MOIRÉ EXORCIST (Halftone Descreening)
-    if (!animated && (outWidth > 2000 || outHeight > 2000)) {
-      instance.median(1);
-    }
-
-    let estimatedPixels = totalPixels;
-    let didResize = false;
-    let resizeScale = 1;
-
-    if (!animated) {
-      if (isLongStrip) {
-        if (maxStripWidth > 0 && outWidth > maxStripWidth) {
-          instance.resize({ width: maxStripWidth, withoutEnlargement: true, kernel: 'lanczos3' });
-          resizeScale = maxStripWidth / outWidth;
-          estimatedPixels = Math.round(totalPixels * resizeScale * resizeScale);
-          didResize = true;
-        }
-      } else if (maxOutputDim > 0 && originalMaxDim > maxOutputDim) {
-        instance.resize({ width: maxOutputDim, height: maxOutputDim, fit: 'inside', withoutEnlargement: true, kernel: 'lanczos3' });
-        resizeScale = maxOutputDim / originalMaxDim;
-        estimatedPixels = Math.round(totalPixels * resizeScale * resizeScale);
-        didResize = true;
-      }
-    }
-
-    let shouldSharpen = false;
-    if (sharpenOverride !== undefined) {
-      shouldSharpen = sharpenOverride;
-    } else if (SHARPEN_MODE === 'always') {
-      shouldSharpen = true;
-    } else if (SHARPEN_MODE === 'resized') {
-      shouldSharpen = didResize;
-    }
-
-    if (!animated && shouldSharpen) {
-      // 🛑 THE SMART SHARPEN RADIUS
-      let sigma = SHARPEN_SIGMA;
-      if (didResize && resizeScale < 1) {
-        sigma = Math.min(Math.max(SHARPEN_SIGMA / resizeScale, 0.5), 2.5);
-      }
-      instance.sharpen({ sigma });
-    }
-
-    // 🛑 SMART GRAYSCALE DETECTION
-    let skipGrayscaleConversion = false;
-    if (grayscale && !animated) {
-      const isAlreadyGrayscale = metadata.channels === 1 || metadata.space === 'b-w' || metadata.space === 'gray';
-      
-      if (isAlreadyGrayscale) {
-        skipGrayscaleConversion = true;
-      } else if (metadata.channels >= 3) {
-        try {
-          const thumbStats = await sharp(safeBuffer).resize(50, 50, { fit: 'inside' }).stats();
-          const r = thumbStats.channels[0].mean;
-          const g = thumbStats.channels[1].mean;
-          const b = thumbStats.channels[2].mean;
-          const maxDiff = Math.max(Math.abs(r - g), Math.abs(g - b), Math.abs(r - b));
-          if (maxDiff < 3.0) skipGrayscaleConversion = true;
-        } catch {}
-      }
-    }
-
-    if (grayscale && !skipGrayscaleConversion) {
-      instance.grayscale();
-    }
-
-    // 🛑 THE CHROMA GUILLOTINE (Dynamic Subsampling)
-    let chromaSubsampling = '4:2:0';
-    if (!animated && metadata.channels >= 3) {
-      try {
-        const chromaStats = await sharp(safeBuffer).stats();
-        if (chromaStats.channels.length >= 3) {
-          const rStdev = chromaStats.channels[0].stdev;
-          const gStdev = chromaStats.channels[1].stdev;
-          const bStdev = chromaStats.channels[2].stdev;
-          const maxStdev = Math.max(rStdev, gStdev, bStdev);
-          
-          // High color variance suggests text/graphics that need full color resolution
-          if (maxStdev > 50) {
-            chromaSubsampling = '4:4:4';
+    let microSum = 0;
+    let microCount = 0;
+    for (let y = 0; y < sampleSize - 2; y += 3) {
+      for (let x = 0; x < sampleSize - 2; x += 3) {
+        let sum = 0;
+        let sumSq = 0;
+        for (let dy = 0; dy < 3; dy++) {
+          for (let dx = 0; dx < 3; dx++) {
+            const v = data[(y + dy) * sampleSize + (x + dx)];
+            sum += v;
+            sumSq += v * v;
           }
         }
-      } catch {}
+        const mean = sum / 9;
+        const variance = sumSq / 9 - mean * mean;
+        microSum += variance;
+        microCount++;
+      }
     }
+    const microVariance = microSum / Math.max(microCount, 1);
 
-    const needsFlatten = !animated && metadata.hasAlpha && format === 'jpeg';
-    if (needsFlatten) {
-      instance.flatten({ background: { r: 255, g: 255, b: 255 } });
-    }
-
-    // 🛑 THE ENTROPY GUILLOTINE (Complexity-Based Quality)
-    let entropyAdjustment = 0;
-    if (!animated) {
-      try {
-        const entropyStats = await sharp(safeBuffer).stats();
-        const avgStdev = entropyStats.channels.reduce((sum, ch) => sum + ch.stdev, 0) / entropyStats.channels.length;
-        
-        // Simple image (mostly white/blank): reduce quality
-        // Complex image (detailed/noisy): increase quality
-        if (avgStdev < 30) {
-          entropyAdjustment = -20;
-        } else if (avgStdev > 60) {
-          entropyAdjustment = 15;
+    let macroSum = 0;
+    let macroCount = 0;
+    const macroSize = Math.min(24, sampleSize);
+    for (let y = 0; y < sampleSize - macroSize + 1; y += macroSize) {
+      for (let x = 0; x < sampleSize - macroSize + 1; x += macroSize) {
+        let sum = 0;
+        let sumSq = 0;
+        let count = 0;
+        for (let dy = 0; dy < macroSize; dy++) {
+          for (let dx = 0; dx < macroSize; dx++) {
+            const v = data[(y + dy) * sampleSize + (x + dx)];
+            sum += v;
+            sumSq += v * v;
+            count++;
+          }
         }
-      } catch {}
-    }
-
-    const megapixels = estimatedPixels / 1_000_000;
-    let dynamicQuality = baseQuality + entropyAdjustment;
-    if (!animated) {
-      if (megapixels < 1) {
-        dynamicQuality += 20;
-      } else if (megapixels > 4) {
-        dynamicQuality -= 10;
+        const mean = sum / count;
+        const variance = sumSq / count - mean * mean;
+        macroSum += variance;
+        macroCount++;
       }
     }
-    dynamicQuality = Math.max(MIN_QUALITY, Math.min(dynamicQuality, MAX_QUALITY));
+    const macroVariance = macroSum / Math.max(macroCount, 1);
 
-    let effectiveMaxDim = originalMaxDim;
-    if (!animated) {
-      if (isLongStrip) {
-        effectiveMaxDim = outHeight;
-      } else if (maxOutputDim > 0 && originalMaxDim > maxOutputDim) {
-        effectiveMaxDim = maxOutputDim;
-      }
-    }
+    const ratio = microVariance / Math.max(macroVariance, 1);
+    const isHalftone = microVariance > 150 && macroVariance < 600 && ratio > 0.35;
 
-    if (animated) {
-      res.setHeader('Content-Type', 'image/webp');
-      await pipeline(
-        instance.webp({ quality: baseQuality, effort: WEBP_EFFORT, smartSubsample: true, animated: true }),
-        res
-      );
-      return;
-    }
-
-    // 🛑 THE PANIC ENCODER (JPEG Last Resort)
-    try {
-      if (format === 'avif' && effectiveMaxDim <= MAX_CODEC_DIM) {
-        res.setHeader('Content-Type', 'image/avif');
-        let effort = AVIF_EFFORT_LARGE;
-        if (estimatedPixels < SMALL_PIXEL_LINE) effort = AVIF_EFFORT_SMALL;
-        else if (estimatedPixels < MID_PIXEL_LINE) effort = AVIF_EFFORT_MEDIUM;
-
-        await pipeline(
-          instance.avif({ quality: dynamicQuality, effort, chromaSubsampling }),
-          res
-        );
-        return;
-      }
-
-      if (format === 'webp' && effectiveMaxDim <= MAX_CODEC_DIM) {
-        res.setHeader('Content-Type', 'image/webp');
-        await pipeline(
-          instance.webp({ quality: dynamicQuality, effort: WEBP_EFFORT, smartSubsample: true }),
-          res
-        );
-        return;
-      }
-
-      res.setHeader('Content-Type', 'image/jpeg');
-      await pipeline(
-        instance.jpeg({ quality: dynamicQuality, progressive: true, mozjpeg: true, chromaSubsampling }),
-        res
-      );
-    } catch (encodeError) {
-      // If AVIF/WebP encoding fails, fall back to JPEG instead of sending the raw original
-      if (!res.headersSent) {
-        try {
-          res.setHeader('Content-Type', 'image/jpeg');
-          await pipeline(
-            instance.jpeg({ quality: dynamicQuality, progressive: true, mozjpeg: true, chromaSubsampling: '4:2:0' }),
-            res
-          );
-          return;
-        } catch {
-          // If JPEG also fails, fall through to sendOriginal
-        }
-      }
-      sendOriginal(req, res, inputBuffer);
-    }
+    return {
+      isHalftone,
+      confidence: isHalftone ? 0.9 : 0.1,
+      microVariance,
+      macroVariance,
+    };
   } catch {
-    sendOriginal(req, res, inputBuffer);
+    return { isHalftone: false, confidence: 0 };
   }
 }
 
-export default compress;
+async function detectLineArt(buffer, analysis) {
+  if (!analysis.isGrayscale) {
+    return { isLineArt: false, confidence: 0 };
+  }
+
+  try {
+    const { data } = await sharp(buffer)
+      .resize(256, 256, { fit: 'inside' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < data.length; i++) {
+      hist[data[i]]++;
+    }
+
+    const total = data.length;
+
+    let darkPeak = 0;
+    let lightPeak = 0;
+    for (let i = 0; i <= 80; i++) darkPeak = Math.max(darkPeak, hist[i]);
+    for (let i = 175; i <= 255; i++) lightPeak = Math.max(lightPeak, hist[i]);
+
+    let middleSum = 0;
+    for (let i = 100; i <= 155; i++) middleSum += hist[i];
+
+    const darkRatio = darkPeak / total;
+    const lightRatio = lightPeak / total;
+    const middleRatio = middleSum / total;
+
+    const isBimodal = darkRatio > 0.05 && lightRatio > 0.15 && middleRatio < 0.15;
+    const isSharp = analysis.sharpness > 30;
+
+    const isLineArt = isBimodal && isSharp;
+    const confidence = isLineArt ? 0.93 : 0.1;
+
+    return { isLineArt, confidence, darkRatio, lightRatio, middleRatio };
+  } catch {
+    return { isLineArt: false, confidence: 0 };
+  }
+}
+
+async function detectImageType(buffer, metadata) {
+  const stats = await sharp(buffer).stats();
+  const { channels, width, height } = stats;
+
+  let totalEntropy = 0;
+  let totalSharpness = 0;
+  let colorVariance = 0;
+
+  if (channels && channels.length > 0) {
+    for (const ch of channels) {
+      totalEntropy += ch.entropy || 0;
+      totalSharpness += ch.sharpness || 0;
+    }
+    totalEntropy /= channels.length;
+    totalSharpness /= channels.length;
+
+    if (channels.length >= 3) {
+      const rMean = channels[0].mean || 0;
+      const gMean = channels[1].mean || 0;
+      const bMean = channels[2].mean || 0;
+      colorVariance = Math.abs(rMean - gMean) + Math.abs(gMean - bMean) + Math.abs(rMean - bMean);
+    }
+  }
+
+  const isGrayscale = colorVariance < 15;
+  const isHighContrast = totalEntropy > 6.5;
+  const isColorful = colorVariance > 80;
+  const aspectRatio = height / width;
+
+  const isMangaStrip = aspectRatio > 2.5 && isGrayscale;
+  const isMangaPage = aspectRatio > 1.2 && aspectRatio < 2.0 && isGrayscale;
+  const isAnime = isColorful && totalSharpness > 100;
+
+  return {
+    isGrayscale,
+    isHighContrast,
+    isColorful,
+    isMangaStrip,
+    isMangaPage,
+    isAnime,
+    entropy: totalEntropy,
+    sharpness: totalSharpness,
+    colorVariance,
+    aspectRatio,
+  };
+}
+
+function calculateQuality(analysis, baseQuality) {
+  if (analysis.isAnime) return ANIME_QUALITY;
+  if (analysis.isMangaStrip || analysis.isMangaPage) return Math.min(baseQuality + 10, 90);
+  if (analysis.isGrayscale) return Math.min(baseQuality + 5, 85);
+  if (analysis.entropy > 7.5) return PHOTO_QUALITY;
+  return baseQuality;
+}
+
+function getViewportMaxDim(req) {
+  const viewportWidth = parseInt(req.headers['sec-ch-viewport-width']) ||
+                        parseInt(req.headers['viewport-width']) ||
+                        VIEWPORT_FALLBACK;
+  const dpr = parseFloat(req.headers['sec-ch-dpr']) ||
+              parseFloat(req.headers['dpr']) || 1;
+  const effectiveWidth = Math.round(viewportWidth * dpr);
+  return Math.max(320, Math.min(effectiveWidth, MAX_OUTPUT_DIM));
+}
+
+export default async function compress(req, res, buffer) {
+  try {
+    const metadata = await sharp(buffer).metadata();
+    const format = metadata.format;
+
+    if (!format || format === 'raw') {
+      return buffer;
+    }
+
+    const pHash = await generatePerceptualHash(buffer);
+    const cachedResult = checkPerceptualCache(pHash);
+
+    if (cachedResult) {
+      res.setHeader('X-Perceptual-Cache', 'HIT');
+      res.setHeader('Content-Type', cachedResult.contentType);
+      if (cachedResult.placeholder) res.setHeader('X-Placeholder', cachedResult.placeholder);
+      if (cachedResult.grade) res.setHeader('X-Quality-Grade', cachedResult.grade);
+      return cachedResult.buffer;
+    }
+
+    const analysis = await detectImageType(buffer, metadata);
+    const viewportMaxDim = getViewportMaxDim(req);
+
+    let placeholder = null;
+    if (ENABLE_PLACEHOLDER) {
+      placeholder = await generatePlaceholder(buffer);
+    }
+
+    let judgeResult = null;
+    if (ENABLE_JUDGE) {
+      judgeResult = judgeQuality(analysis, metadata);
+    }
+
+    let halftoneResult = null;
+    if (ENABLE_MOIRE) {
+      halftoneResult = await detectHalftone(buffer, metadata, analysis);
+    }
+
+    let lineArtResult = null;
+    if (ENABLE_LINE_DENOISE) {
+      lineArtResult = await detectLineArt(buffer, analysis);
+    }
+
+    const requestedFormat = req.query.f || req.query.format;
+    let outputFormat = 'jpeg';
+
+    if (FORCE_JPEG) {
+      outputFormat = 'jpeg';
+    } else if (requestedFormat === 'avif' && ENABLE_AVIF) {
+      outputFormat = 'avif';
+    } else if (requestedFormat === 'webp' && ENABLE_WEBP) {
+      outputFormat = 'webp';
+    } else if (!requestedFormat) {
+      const accept = req.headers.accept || '';
+      if (ENABLE_AVIF && accept.includes('image/avif')) {
+        outputFormat = 'avif';
+      } else if (ENABLE_WEBP && accept.includes('image/webp')) {
+        outputFormat = 'webp';
+      }
+    } else if (requestedFormat === 'jpeg' || requestedFormat === 'jpg') {
+      outputFormat = 'jpeg';
+    } else if (requestedFormat === 'png') {
+      outputFormat = 'png';
+    }
+
+    const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
+    let quality = calculateQuality(analysis, baseQuality);
+
+    if (judgeResult) {
+      quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
+    }
+
+    const isAnimated = metadata.pages > 1;
+    const frameCount = metadata.pages || 1;
+
+    if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
+      res.setHeader('X-Frame-Cap', 'TRUNCATED');
+      return buffer;
+    }
+
+    let pipeline = sharp(buffer, {
+      animated: isAnimated,
+      limitInputPixels: 268402689,
+    });
+
+    pipeline = pipeline.withMetadata({
+      orientation: metadata.orientation || 1,
+    });
+
+    pipeline = pipeline.toColourspace('srgb');
+
+    if (FORCE_GRAYSCALE || (analysis.isGrayscale && !analysis.isColorful)) {
+      pipeline = pipeline.grayscale();
+    }
+
+    if (halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
+      pipeline = pipeline.median(3);
+      res.setHeader('X-Moire-Removed', 'true');
+    }
+
+    if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) {
+      pipeline = pipeline.median(3);
+      pipeline = pipeline.sharpen({
+        sigma: 0.6,
+        flat: 3.0,
+        jagged: 1.5,
+      });
+      res.setHeader('X-Line-Denoise', 'true');
+    }
+
+    let targetWidth = null;
+    let targetHeight = null;
+
+    const { width: origW, height: origH } = metadata;
+
+    if (analysis.isMangaStrip) {
+      if (origW > MAX_STRIP_WIDTH) {
+        targetWidth = MAX_STRIP_WIDTH;
+      }
+    } else {
+      if (origW > viewportMaxDim || origH > viewportMaxDim) {
+        const scale = Math.min(viewportMaxDim / origW, viewportMaxDim / origH);
+        targetWidth = Math.round(origW * scale);
+        targetHeight = Math.round(origH * scale);
+      }
+    }
+
+    if (targetWidth || targetHeight) {
+      pipeline = pipeline.resize(targetWidth, targetHeight, {
+        fit: 'inside',
+        withoutEnlargement: true,
+        kernel: sharp.kernel.lanczos3,
+      });
+    }
+
+    if (analysis.sharpness < 50 && !analysis.isMangaStrip) {
+      const alreadySharpened = lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85;
+      if (!alreadySharpened) {
+        pipeline = pipeline.sharpen({
+          sigma: 0.8,
+          flat: 2.0,
+          jagged: 1.0,
+        });
+      }
+    }
+
+    if (STRIP_ALPHA && outputFormat === 'jpeg') {
+      pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+    }
+
+    let outputBuffer;
+    let contentType;
+
+    switch (outputFormat) {
+      case 'avif':
+        outputBuffer = await pipeline.avif({
+          quality: Math.min(quality, 63),
+          effort: 4,
+          chromaSubsampling: analysis.isGrayscale ? '4:0:0' : '4:2:0',
+        }).toBuffer();
+        contentType = 'image/avif';
+        break;
+
+      case 'webp':
+        outputBuffer = await pipeline.webp({
+          quality: quality,
+          effort: 4,
+          smartSubsample: true,
+        }).toBuffer();
+        contentType = 'image/webp';
+        break;
+
+      case 'png':
+        outputBuffer = await pipeline.png({
+          compressionLevel: 8,
+          palette: analysis.isGrayscale,
+          quality: quality,
+        }).toBuffer();
+        contentType = 'image/png';
+        break;
+
+      case 'jpeg':
+      default:
+        outputBuffer = await pipeline.jpeg({
+          quality: quality,
+          progressive: true,
+          mozjpeg: true,
+          chromaSubsampling: analysis.isGrayscale ? '4:0:0' : '4:2:0',
+          trellisQuantisation: true,
+          overshootDeringing: true,
+          optimiseScans: true,
+        }).toBuffer();
+        contentType = 'image/jpeg';
+        break;
+    }
+
+    if (outputBuffer.length >= buffer.length) {
+      res.setHeader('X-Compression', 'SKIPPED');
+      res.setHeader('Content-Type', `image/${format}`);
+      if (placeholder) res.setHeader('X-Placeholder', placeholder);
+      if (judgeResult) res.setHeader('X-Quality-Grade', judgeResult.grade);
+      return buffer;
+    }
+
+    setPerceptualCache(pHash, {
+      buffer: outputBuffer,
+      contentType: contentType,
+      placeholder: placeholder,
+      grade: judgeResult ? judgeResult.grade : null,
+    });
+
+    res.setHeader('X-Perceptual-Cache', 'MISS');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-Compression-Ratio',
+      ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%');
+
+    if (placeholder) {
+      res.setHeader('X-Placeholder', placeholder);
+    }
+
+    if (judgeResult) {
+      res.setHeader('X-Quality-Grade', judgeResult.grade);
+      res.setHeader('X-Quality-Score', String(judgeResult.score));
+    }
+
+    res.setHeader('X-Image-Type', analysis.isMangaStrip ? 'manga-strip' :
+      analysis.isMangaPage ? 'manga-page' :
+      analysis.isAnime ? 'anime' :
+      analysis.isGrayscale ? 'grayscale' : 'photo');
+
+    return outputBuffer;
+
+  } catch (err) {
+    console.error('[COMPRESS ERROR]', err.message);
+    res.setHeader('X-Compression', 'FAILED');
+    return buffer;
+  }
+  }
