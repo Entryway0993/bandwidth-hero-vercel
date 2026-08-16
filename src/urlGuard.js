@@ -23,6 +23,27 @@ const BLOCKED_SUFFIXES = [
   '.exit'
 ];
 
+// 🛑 THE DNS MEMORY PALACE (LRU Resolver Cache)
+const DNS_CACHE = new Map();
+const DNS_TTL = 60000; // 60 seconds
+
+function getCachedDns(hostname) {
+  const entry = DNS_CACHE.get(hostname);
+  if (entry && Date.now() - entry.time < DNS_TTL) {
+    return entry.data;
+  }
+  return null;
+}
+
+function setCachedDns(hostname, data) {
+  // Simple LRU: if cache gets too big, evict the oldest entry
+  if (DNS_CACHE.size > 1000) {
+    const firstKey = DNS_CACHE.keys().next().value;
+    DNS_CACHE.delete(firstKey);
+  }
+  DNS_CACHE.set(hostname, { time: Date.now(), data });
+}
+
 function ssrfError() {
   const error = new Error('SSRF_BLOCKED_DNS');
   error.code = 'SSRF_BLOCKED_DNS';
@@ -139,6 +160,26 @@ export function safeLookup(hostname, options, callback) {
     return callback(null, host, ipFamily);
   }
 
+  // 🛑 DNS MEMORY PALACE (Check Cache)
+  const cached = getCachedDns(host);
+  if (cached) {
+    let addresses = cached.slice();
+
+    if (family === 4) addresses = addresses.filter(a => a.family === 4);
+    if (family === 6) addresses = addresses.filter(a => a.family === 6);
+    
+    if (!addresses.length) return callback(ssrfError());
+    
+    addresses.sort((a, b) => {
+      if (a.family === b.family) return 0;
+      return a.family === 4 ? -1 : 1;
+    });
+
+    if (wantsAll) return callback(null, addresses);
+    const chosen = addresses[0];
+    return callback(null, chosen.address, chosen.family);
+  }
+
   // Non-blocking DNS resolution.
   const tasks = [];
 
@@ -169,6 +210,9 @@ export function safeLookup(hostname, options, callback) {
       if (!addresses.length) {
         return callback(ssrfError());
       }
+
+      // 🛑 DNS MEMORY PALACE (Store in Cache)
+      setCachedDns(host, addresses);
 
       // Prefer IPv4, similar to verbatim:false behavior.
       addresses.sort((a, b) => {
