@@ -27,7 +27,6 @@ const AVIF_EFFORT_MEDIUM = envInt('AVIF_EFFORT_MEDIUM', 3);
 const AVIF_EFFORT_LARGE = envInt('AVIF_EFFORT_LARGE', 2);
 const WEBP_EFFORT = envInt('WEBP_EFFORT', 4);
 
-// off | resized | always
 const SHARPEN_MODE = String(process.env.SHARPEN_MODE || 'resized').toLowerCase();
 const SHARPEN_SIGMA = envFloat('SHARPEN_SIGMA', 0.8);
 
@@ -66,7 +65,6 @@ async function compress(req, res, inputBuffer) {
   const maxOutputDim = Number(req.opts?.maxDim) || 0;
   const maxStripWidth = Number(req.opts?.maxStripWidth) || 0;
 
-  // Sharpen query override: ?sharpen=1 or ?sharpen=0
   const sharpenQuery = req.query?.sharpen;
   let sharpenOverride;
   if (sharpenQuery === '1' || sharpenQuery === 'true' || sharpenQuery === 'on') sharpenOverride = true;
@@ -83,7 +81,8 @@ async function compress(req, res, inputBuffer) {
     });
 
     const metadata = await instance.metadata();
-    const animated = (metadata.pages || 1) > 1;
+    const frameCount = metadata.pages || 1;
+    const animated = frameCount > 1;
 
     let outWidth = metadata.width || 0;
     let outHeight = metadata.height || 0;
@@ -93,6 +92,21 @@ async function compress(req, res, inputBuffer) {
       const tmp = outWidth;
       outWidth = outHeight;
       outHeight = tmp;
+    }
+
+    // 🛑 DYNAMIC ANIMATED FRAME BOMB CAP.
+    // "Maximum allowed" is dictated by your 1024MB RAM limit.
+    // We reserve ~324MB for Node.js, Sharp, and the final encoding buffer.
+    // The remaining ~700MB is divided by the raw pixel size of one frame.
+    const MAX_RAM_FOR_FRAMES = 700 * 1024 * 1024; 
+    const pixelsPerFrame = Math.max(1, outWidth * outHeight);
+    const dynamicFrameCap = Math.floor(MAX_RAM_FOR_FRAMES / (pixelsPerFrame * 4));
+    
+    // Absolute ceiling: 1000 frames. Even if you have the RAM, the 60s timeout will kill you.
+    const safeFrameCap = Math.max(1, Math.min(dynamicFrameCap, 1000));
+
+    if (animated && frameCount > safeFrameCap) {
+      return sendOriginal(req, res, inputBuffer);
     }
 
     const originalMaxDim = Math.max(outWidth, outHeight);
@@ -135,7 +149,6 @@ async function compress(req, res, inputBuffer) {
       instance.grayscale();
     }
 
-    // Decide sharpen.
     let shouldSharpen = false;
     if (sharpenOverride !== undefined) {
       shouldSharpen = sharpenOverride;
@@ -147,6 +160,12 @@ async function compress(req, res, inputBuffer) {
 
     if (!animated && shouldSharpen) {
       instance.sharpen({ sigma: SHARPEN_SIGMA });
+    }
+
+    // 🛑 SURGICAL FIX: Transparent PNG -> White JPEG Safety.
+    const needsFlatten = !animated && metadata.hasAlpha && format === 'jpeg';
+    if (needsFlatten) {
+      instance.flatten({ background: { r: 255, g: 255, b: 255 } });
     }
 
     let effectiveMaxDim = originalMaxDim;
