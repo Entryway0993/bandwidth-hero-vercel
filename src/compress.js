@@ -27,6 +27,7 @@ const ENABLE_PLACEHOLDER = envBool('ENABLE_PLACEHOLDER', true);
 const ENABLE_JUDGE = envBool('ENABLE_JUDGE', true);
 const ENABLE_MOIRE = envBool('ENABLE_MOIRE', true);
 const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
+const ENABLE_LUMINANCE = envBool('ENABLE_LUMINANCE', true);
 
 async function generatePerceptualHash(buffer) {
   try {
@@ -244,8 +245,13 @@ async function detectImageType(buffer, metadata) {
   let totalEntropy = 0;
   let totalSharpness = 0;
   let colorVariance = 0;
+  let meanLuminance = 128;
+  let stdevLuminance = 50;
 
   if (channels && channels.length > 0) {
+    meanLuminance = channels[0].mean || 128;
+    stdevLuminance = channels[0].stdev || 50;
+
     for (const ch of channels) {
       totalEntropy += ch.entropy || 0;
       totalSharpness += ch.sharpness || 0;
@@ -281,6 +287,8 @@ async function detectImageType(buffer, metadata) {
     sharpness: totalSharpness,
     colorVariance,
     aspectRatio,
+    meanLuminance,
+    stdevLuminance,
   };
 }
 
@@ -300,6 +308,13 @@ function getViewportMaxDim(req) {
               parseFloat(req.headers['dpr']) || 1;
   const effectiveWidth = Math.round(viewportWidth * dpr);
   return Math.max(320, Math.min(effectiveWidth, MAX_OUTPUT_DIM));
+}
+
+function getChromaSubsampling(analysis) {
+  if (analysis.isGrayscale) return '4:0:0';
+  if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
+  if (analysis.isAnime) return '4:2:2';
+  return '4:2:0';
 }
 
 export default async function compress(req, res, buffer) {
@@ -397,6 +412,16 @@ export default async function compress(req, res, buffer) {
       pipeline = pipeline.grayscale();
     }
 
+    if (ENABLE_LUMINANCE && !isAnimated) {
+      if (analysis.meanLuminance < 85 && analysis.stdevLuminance < 50) {
+        pipeline = pipeline.gamma(1.4);
+        res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
+      } else if (analysis.meanLuminance > 210 && analysis.stdevLuminance < 50) {
+        pipeline = pipeline.gamma(0.7);
+        res.setHeader('X-Luminance-Fix', 'OVEREXPOSED');
+      }
+    }
+
     if (halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
       pipeline = pipeline.median(3);
       res.setHeader('X-Moire-Removed', 'true');
@@ -452,6 +477,8 @@ export default async function compress(req, res, buffer) {
       pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
     }
 
+    const chromaSubsampling = getChromaSubsampling(analysis);
+
     let outputBuffer;
     let contentType;
 
@@ -460,7 +487,7 @@ export default async function compress(req, res, buffer) {
         outputBuffer = await pipeline.avif({
           quality: Math.min(quality, 63),
           effort: 4,
-          chromaSubsampling: analysis.isGrayscale ? '4:0:0' : '4:2:0',
+          chromaSubsampling: chromaSubsampling,
         }).toBuffer();
         contentType = 'image/avif';
         break;
@@ -489,7 +516,7 @@ export default async function compress(req, res, buffer) {
           quality: quality,
           progressive: true,
           mozjpeg: true,
-          chromaSubsampling: analysis.isGrayscale ? '4:0:0' : '4:2:0',
+          chromaSubsampling: chromaSubsampling,
           trellisQuantisation: true,
           overshootDeringing: true,
           optimiseScans: true,
