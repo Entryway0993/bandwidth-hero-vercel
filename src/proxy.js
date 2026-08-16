@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import got from 'got';
 import { Agent } from 'node:https';
 import sharp from 'sharp';
@@ -35,16 +36,15 @@ function getRandomUA() {
   return UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 }
 
-const GHOST_WEBP = await sharp({
-  create: { width: 200, height: 200, channels: 3, background: { r: 35, g: 35, b: 40 } }
-}).webp({ quality: 10, effort: 1 }).toBuffer();
+// 🛑 THE PROTOCOL GHOST (43-Byte Transparent GIF)
+const GHOST_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
 function sendGhost(res, cacheSeconds = 3600) {
   if (!res.headersSent) {
-    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Content-Type', 'image/gif');
     res.setHeader('Cache-Control', `public, max-age=${cacheSeconds}`);
     res.setHeader('x-ghost', 'true');
-    res.status(200).end(GHOST_WEBP);
+    res.status(200).end(GHOST_GIF);
   }
 }
 
@@ -77,9 +77,25 @@ function detectContentType(buffer) {
   return 'application/octet-stream';
 }
 
+// 🛑 LOCAL CACHE ANCHOR (Deterministic ETag Generation)
+function generateETag(req, targetUrl) {
+  const payload = JSON.stringify({
+    url: targetUrl,
+    format: req.opts?.format,
+    quality: req.opts?.quality,
+    grayscale: req.opts?.grayscale,
+    maxDim: req.opts?.maxDim,
+    maxStripWidth: req.opts?.maxStripWidth,
+    sharpen: req.query?.sharpen,
+    rotate: req.query?.rotate,
+    debug: req.query?.debug
+  });
+  return `"${crypto.createHash('md5').update(payload).digest('hex')}"`;
+}
+
 // 🛑 FETCH EXECUTOR (Tracks download size to prevent RAM bombs)
-function executeFetch(url, cfg) {
-  const request = got(url, cfg);
+function executeFetch(url, cfg, abortSignal) {
+  const request = got(url, { ...cfg, signal: abortSignal });
   request.on('downloadProgress', (progress) => {
     const size = Math.max(progress.total || 0, progress.transferred || 0);
     if (size > MAX_DOWNLOAD_BYTES) {
@@ -89,7 +105,46 @@ function executeFetch(url, cfg) {
   return request;
 }
 
+// 🛑 PRE-FLIGHT GUILLOTINE (Zero-Byte Size Check)
+async function safeExecuteFetch(url, cfg, abortSignal) {
+  try {
+    const headRes = await got.head(url, {
+      ...cfg,
+      responseType: 'text',
+      signal: abortSignal
+    });
+    const contentLength = parseInt(headRes.headers['content-length'] || '0', 10);
+    
+    if (contentLength > MAX_DOWNLOAD_BYTES) {
+      const err = new Error('BODY_TOO_LARGE');
+      err.code = 'BODY_TOO_LARGE';
+      throw err;
+    }
+  } catch (err) {
+    if (err.code === 'BODY_TOO_LARGE') throw err;
+    // If HEAD fails, proceed to normal download
+  }
+
+  return executeFetch(url, cfg, abortSignal);
+}
+
 export default async function proxy(req, res) {
+  const startTime = Date.now();
+
+  // 🛑 ZOMBIE EXORCIST (V8 Heap Suicidal Pill)
+  // If memory crosses 800MB, intentionally crash to force a fresh container.
+  if (process.memoryUsage().heapUsed > 800 * 1024 * 1024) {
+    process.exit(1);
+  }
+
+  // 🛑 THE PHANTOM LIMB SEVERER
+  const abortController = new AbortController();
+  let isAborted = false;
+  res.on('close', () => {
+    isAborted = true;
+    abortController.abort();
+  });
+
   let targetUrl = req.opts?.url || req.query?.url;
 
   if (Array.isArray(targetUrl)) {
@@ -107,6 +162,12 @@ export default async function proxy(req, res) {
     targetUrl = new URL(targetUrl).href;
   } catch {
     return sendGhost(res, 60);
+  }
+
+  // 🛑 LOCAL CACHE ANCHOR (304 Not Modified)
+  const etag = generateETag(req, targetUrl);
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
   }
 
   const { 'user-agent': userAgent } = req.headers;
@@ -193,7 +254,7 @@ export default async function proxy(req, res) {
   let activeConfig = fetchConfig;
 
   try {
-    response = await executeFetch(activeUrl, activeConfig);
+    response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
     statusCode = response.statusCode;
     responseHeaders = response.headers;
 
@@ -202,13 +263,20 @@ export default async function proxy(req, res) {
       throw new Error('WORKER_5XX_FAILURE');
     }
   } catch (err) {
+    if (isAborted) return; // Client is gone, stop processing
+    
     if (isWorkerFetch) {
       // 🛑 WORKER FALLBACK PROTOCOL (Direct-to-Origin Rescue)
       activeUrl = targetUrl;
       activeConfig = config;
-      response = await executeFetch(activeUrl, activeConfig);
-      statusCode = response.statusCode;
-      responseHeaders = response.headers;
+      try {
+        response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
+        statusCode = response.statusCode;
+        responseHeaders = response.headers;
+      } catch (fallbackErr) {
+        if (isAborted) return;
+        throw fallbackErr;
+      }
     } else {
       throw err;
     }
@@ -218,10 +286,11 @@ export default async function proxy(req, res) {
   if (statusCode === 403) {
     const retryHeaders = { ...activeConfig.headers, 'user-agent': getRandomUA() };
     try {
-      response = await executeFetch(activeUrl, { ...activeConfig, headers: retryHeaders });
+      response = await safeExecuteFetch(activeUrl, { ...activeConfig, headers: retryHeaders }, abortController.signal);
       statusCode = response.statusCode;
       responseHeaders = response.headers;
-    } catch {
+    } catch (err) {
+      if (isAborted) return;
       // Retry failed, keep original 403
     }
   }
@@ -261,11 +330,44 @@ export default async function proxy(req, res) {
       return sendGhost(res, 3600);
     }
 
+    // 🛑 THE SOCRATIC MIRROR (Deep Interrogation Mode)
+    if (req.query?.debug === '1') {
+      try {
+        const sharpInstance = sharp(rawBody, { animated: true });
+        const metadata = await sharpInstance.metadata();
+        
+        const report = {
+          status: statusCode,
+          originType: detectedType,
+          format: metadata.format,
+          width: metadata.width,
+          height: metadata.height,
+          space: metadata.space,
+          channels: metadata.channels,
+          isAnimated: (metadata.pages || 1) > 1,
+          frames: metadata.pages || 1,
+          hasAlpha: metadata.hasAlpha,
+          exif: metadata.exif ? 'present' : 'none',
+          sizeBytes: rawBody.length,
+          upstreamCacheControl: upstreamCacheControl,
+          executionTimeMs: Date.now() - startTime
+        };
+        
+        return res.status(200).json(report);
+      } catch (err) {
+        return res.status(500).json({ error: 'Debug analysis failed', message: err.message });
+      }
+    }
+
     delete responseHeaders['content-encoding'];
     delete responseHeaders['content-length'];
 
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
     res.setHeader('Content-Type', detectedType);
+    
+    // 🛑 LOCAL CACHE ANCHOR (Set ETag & Allow Local Caching)
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
 
     req.opts.originType = detectedType;
 
@@ -285,6 +387,8 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
+    if (isAborted) return; // Client disconnected, do nothing
+
     const isBodyTooLarge =
       error.message === 'BODY_TOO_LARGE' ||
       error.code === 'ERR_BODY_LARGE' ||
