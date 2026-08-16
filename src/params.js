@@ -140,54 +140,58 @@ function params(req, res, next) {
       });
     }
 
+    // 🛑 THE DATA SAVER PROTOCOL (Android Automation)
+    // Reads the standard Save-Data header sent by your Samsung Galaxy A73.
+    const saveData = ['1', 'true', 'yes', 'on'].includes(
+      String(req.headers['save-data'] || req.headers['sec-ch-save-data'] || '').toLowerCase()
+    );
+
+    const baseQuality = saveData ? Math.max(MIN_QUALITY, DEFAULT_QUALITY - 20) : DEFAULT_QUALITY;
+    const baseMaxDim = saveData ? 1440 : DEFAULT_MAX_OUTPUT_DIM;
+    const baseStripWidth = saveData ? 1080 : DEFAULT_MAX_STRIP_WIDTH;
+
     req.opts = {
       url: safeUrl.href,
       format: parseFormat(req),
       grayscale: parseBoolean(req.query.bw, DEFAULT_GRAYSCALE),
       quality: parseQuality(
         req.query.l ?? req.query.q ?? req.query.quality,
-        DEFAULT_QUALITY,
+        baseQuality,
         MIN_QUALITY,
         MAX_QUALITY
       ),
       maxDim: clampInt(
         req.query.max_dim ?? req.query.maxdim ?? req.query.max,
-        DEFAULT_MAX_OUTPUT_DIM,
+        baseMaxDim,
         0,
         4096
       ),
       maxStripWidth: clampInt(
         req.query.strip_w ?? req.query.stripw ?? req.query.strip_width,
-        DEFAULT_MAX_STRIP_WIDTH,
+        baseStripWidth,
         0,
         4096
       )
     };
 
-    // 🛑 THE PROFILE INJECTION
-    // The client sends one word. The proxy rewrites the physics.
     const mode = String(req.query.mode || '').toLowerCase();
 
     if (mode === 'manga' || mode === 'comic') {
-      // Standard manga pages. Cap side, force sharpen.
-      req.opts.maxDim = req.opts.maxDim || DEFAULT_MAX_OUTPUT_DIM;
-      req.opts.maxStripWidth = 0; // Disable strip logic
+      req.opts.maxDim = req.opts.maxDim || baseMaxDim;
+      req.opts.maxStripWidth = 0;
       if (req.query.sharpen === undefined) req.query.sharpen = '1';
       
     } else if (mode === 'strip' || mode === 'webtoon' || mode === 'manhwa' || mode === 'manhua') {
-      // Long vertical strips. Disable side cap, cap width, force sharpen.
       req.opts.maxDim = 0; 
-      req.opts.maxStripWidth = req.opts.maxStripWidth || DEFAULT_MAX_STRIP_WIDTH;
+      req.opts.maxStripWidth = req.opts.maxStripWidth || baseStripWidth;
       if (req.query.sharpen === undefined) req.query.sharpen = '1';
       
     } else if (mode === 'photo' || mode === 'normal') {
-      // Normal photos. Cap side, disable sharpen to save CPU.
-      req.opts.maxDim = req.opts.maxDim || DEFAULT_MAX_OUTPUT_DIM;
+      req.opts.maxDim = req.opts.maxDim || baseMaxDim;
       req.opts.maxStripWidth = 0;
       if (req.query.sharpen === undefined) req.query.sharpen = '0';
       
     } else if (mode === 'raw' || mode === 'bypass') {
-      // No resizing. Pass straight to encoder.
       req.opts.maxDim = 0;
       req.opts.maxStripWidth = 0;
       req.query.sharpen = '0';
