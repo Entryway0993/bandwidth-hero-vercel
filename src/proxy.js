@@ -1,17 +1,13 @@
 import got from 'got';
 import { Agent } from 'node:https';
+import sharp from 'sharp';
 import { parseSafeUrl, safeLookup } from './urlGuard.js';
 import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
-// Make memory predictable.
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
-
-// Hard download cap. Default 20MB.
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
-
-// 60s Vercel limit needs a fetch budget.
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
 const CLOUDFLARE_STATUS_CODES = new Set([403, 503]);
@@ -25,6 +21,22 @@ const chromeCipherAgent = new Agent({
   minVersion: 'TLSv1.2',
   maxVersion: 'TLSv1.3'
 });
+
+// 🛑 THE GHOST PLACEHOLDER
+// Generate a tiny 200x200 dark gray WebP on startup. 
+// Returned when upstream images are dead, blocked, or timed out.
+const GHOST_WEBP = await sharp({
+  create: { width: 200, height: 200, channels: 3, background: { r: 35, g: 35, b: 40 } }
+}).webp({ quality: 10, effort: 1 }).toBuffer();
+
+function sendGhost(res, cacheSeconds = 3600) {
+  if (!res.headersSent) {
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', `public, max-age=${cacheSeconds}`);
+    res.setHeader('x-ghost', 'true');
+    res.status(200).end(GHOST_WEBP);
+  }
+}
 
 function toBuffer(value) {
   if (Buffer.isBuffer(value)) return value;
@@ -41,59 +53,13 @@ function bypass(req, res, rawBody, statusCode = 200) {
 function detectContentType(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 2) return 'application/octet-stream';
 
-  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
-    return 'image/jpeg';
-  }
-
-  if (
-    buffer.length >= 4 &&
-    buffer[0] === 0x89 &&
-    buffer[1] === 0x50 &&
-    buffer[2] === 0x4e &&
-    buffer[3] === 0x47
-  ) {
-    return 'image/png';
-  }
-
-  if (
-    buffer.length >= 4 &&
-    buffer[0] === 0x47 &&
-    buffer[1] === 0x49 &&
-    buffer[2] === 0x46 &&
-    buffer[3] === 0x38
-  ) {
-    return 'image/gif';
-  }
-
-  if (buffer[0] === 0x42 && buffer[1] === 0x4d) {
-    return 'image/bmp';
-  }
-
-  if (
-    buffer.length >= 6 &&
-    buffer[0] === 0x00 &&
-    buffer[1] === 0x00 &&
-    buffer[2] === 0x01 &&
-    buffer[3] === 0x00
-  ) {
-    return 'image/x-icon';
-  }
-
-  if (
-    buffer.length >= 12 &&
-    buffer[0] === 0x52 &&
-    buffer[1] === 0x49 &&
-    buffer[2] === 0x46 &&
-    buffer[3] === 0x46 &&
-    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
-  ) {
-    return 'image/webp';
-  }
-
-  if (
-    buffer.length >= 12 &&
-    buffer.subarray(4, 8).toString('ascii') === 'ftyp'
-  ) {
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
+  if (buffer.length >= 4 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
+  if (buffer.length >= 6 && buffer[0] === 0x00 && buffer[1] === 0x00 && buffer[2] === 0x01 && buffer[3] === 0x00) return 'image/x-icon';
+  if (buffer.length >= 12 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = buffer.subarray(8, 12).toString('ascii');
     if (brand === 'avif' || brand === 'avis') return 'image/avif';
   }
@@ -109,7 +75,7 @@ export default async function proxy(req, res) {
   }
 
   if (!targetUrl || typeof targetUrl !== 'string') {
-    return res.status(400).json({ error: 'Missing URL parameter' });
+    return sendGhost(res, 60);
   }
 
   targetUrl = targetUrl.trim();
@@ -118,7 +84,7 @@ export default async function proxy(req, res) {
   try {
     targetUrl = new URL(targetUrl).href;
   } catch {
-    return res.status(400).json({ error: 'Malformed URL' });
+    return sendGhost(res, 60);
   }
 
   const { 'user-agent': userAgent } = req.headers;
@@ -135,8 +101,6 @@ export default async function proxy(req, res) {
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"'
   };
-
-  // Cookie relay is severed. Do not forward session tokens to arbitrary upstreams.
 
   const config = {
     headers,
@@ -175,9 +139,7 @@ export default async function proxy(req, res) {
       const internalKey = process.env.INTERNAL_KEY;
 
       if (!internalKey) {
-        return res.status(500).json({
-          error: 'Server misconfigured: INTERNAL_KEY is required when CF_WORKER_URL is set'
-        });
+        return sendGhost(res, 300);
       }
 
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
@@ -196,7 +158,6 @@ export default async function proxy(req, res) {
 
     request.on('downloadProgress', (progress) => {
       const size = Math.max(progress.total || 0, progress.transferred || 0);
-
       if (size > MAX_DOWNLOAD_BYTES) {
         request.destroy(new Error('BODY_TOO_LARGE'));
       }
@@ -207,50 +168,32 @@ export default async function proxy(req, res) {
     const rawBody = toBuffer(response.rawBody ?? response.body);
 
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
-      return res.status(413).send('File too large');
+      return sendGhost(res, 3600);
     }
 
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('x-frame-options', 'DENY');
-    res.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
-    res.setHeader('x-proxy-cache', 'MISS');
-
-    if (CLOUDFLARE_STATUS_CODES.has(statusCode)) {
-      return res.status(statusCode === 503 ? 503 : 403).json({
-        error: 'Blocked by upstream WAF or challenge'
-      });
+    // 🛑 GHOST PROTOCOL: Upstream Dead or Blocked
+    if (statusCode === 404 || statusCode === 410) {
+      return sendGhost(res, 86400); // Cache "Not Found" for 1 day
+    }
+    
+    if (statusCode === 403) {
+      return sendGhost(res, 3600); // Cache "Forbidden" for 1 hour
     }
 
     if (statusCode < 200 || statusCode >= 300) {
-      const safeStatus = Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 600
-        ? statusCode
-        : 502;
-
-      return res.status(safeStatus).json({
-        error: 'Upstream request failed'
-      });
+      return sendGhost(res, 60); // Short cache for other random upstream errors
     }
 
-    // Trust magic bytes, not upstream Content-Type lies.
     const detectedType = detectContentType(rawBody);
 
-    if (!detectedType.startsWith('image/')) {
-      return res.status(415).json({
-        error: 'Unsupported media type: only images are allowed'
-      });
-    }
-
-    if (detectedType === 'image/svg+xml') {
-      return res.status(415).json({
-        error: 'SVG is not allowed'
-      });
+    if (!detectedType.startsWith('image/') || detectedType === 'image/svg+xml') {
+      return sendGhost(res, 3600);
     }
 
     delete responseHeaders['content-encoding'];
     delete responseHeaders['content-length'];
 
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
-
     res.setHeader('Content-Type', detectedType);
 
     req.opts.originType = detectedType;
@@ -263,28 +206,23 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    const isBlocked = error.response && error.response.statusCode === 403;
-    const isMalformed = error.message === 'Invalid URL';
-
     const isBodyTooLarge =
       error.message === 'BODY_TOO_LARGE' ||
       error.code === 'ERR_BODY_LARGE' ||
       error.code === 'BODY_TOO_LARGE';
 
-    if (isBlocked) return res.status(403).json({ error: 'Blocked by upstream WAF' });
-    if (isMalformed) return res.status(400).json({ error: 'Malformed URL after redirect' });
-    if (isBodyTooLarge) return res.status(413).send('File too large');
+    if (isBodyTooLarge) return sendGhost(res, 3600);
 
     const code = error.code;
 
     if (code === 'SSRF_BLOCKED_REDIRECT' || code === 'SSRF_BLOCKED_DNS') {
-      return res.status(403).json({ error: 'Blocked by SSRF guard' });
+      return sendGhost(res, 86400);
     }
 
     if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
-      return res.status(504).json({ error: 'Origin request timed out' });
+      return sendGhost(res, 60); // Short cache for timeouts
     }
 
-    return res.status(502).json({ error: 'Proxy request failed' });
+    return sendGhost(res, 60);
   }
 }
