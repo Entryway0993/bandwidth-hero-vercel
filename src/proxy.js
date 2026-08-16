@@ -326,9 +326,10 @@ export default async function proxy(req, res) {
 
     const detectedType = detectContentType(rawBody);
 
-    if (!detectedType.startsWith('image/') || detectedType === 'image/svg+xml') {
+    if (!detectedType.startsWith('image/')) {
       return sendGhost(res, 3600);
     }
+    
 
     // 🛑 THE SOCRATIC MIRROR (Deep Interrogation Mode)
     if (req.query?.debug === '1') {
