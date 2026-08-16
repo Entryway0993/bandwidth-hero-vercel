@@ -365,6 +365,9 @@ export default async function proxy(req, res) {
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
     res.setHeader('Content-Type', detectedType);
     
+    // 🛑 THE BANDWIDTH LEDGER (Pass upstream size to Worker)
+    res.setHeader('x-upstream-content-length', String(rawBody.length));
+    
     // 🛑 LOCAL CACHE ANCHOR (Set ETag & Allow Local Caching)
     res.setHeader('ETag', etag);
     res.setHeader('Cache-Control', 'private, max-age=86400');
