@@ -72,6 +72,16 @@ export function isPublicIP(ip) {
       addr = addr.toIPv4Address();
     }
 
+    // 🛑 SURGICAL FIX: Block Teredo addresses (2001:0000::/32).
+    // Teredo tunnels can encapsulate private IPv4 addresses (e.g., 127.0.0.1),
+    // bypassing the unicast range check. ipaddr.js classifies Teredo as 'unicast'.
+    if (addr.kind() === 'ipv6') {
+      const teredoNetwork = ipaddr.parse('2001:0000::');
+      if (addr.match(teredoNetwork, 32)) {
+        return false;
+      }
+    }
+
     return addr.range() === 'unicast';
   } catch {
     return false;
@@ -230,4 +240,4 @@ export function safeLookup(hostname, options, callback) {
     .catch(err => {
       callback(err);
     });
-}
+      }
