@@ -11,6 +11,45 @@ const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identi
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
+// 🛑 THE UPSTREAM CONDITIONAL FETCHER (Bandwidth Skipping)
+const RAW_VAULT_MAX_BYTES = 30 * 1024 * 1024;
+const RAW_VAULT_MAX_ENTRY = 5 * 1024 * 1024;
+const RAW_VAULT_MAX_ENTRIES = 50;
+const RAW_VAULT = new Map();
+
+function vaultGet(url) {
+  const entry = RAW_VAULT.get(url);
+  if (entry) {
+    entry.lastUsed = Date.now();
+    return entry;
+  }
+  return null;
+}
+
+function vaultSet(url, raw, etag, lastModified) {
+  if (raw.length > RAW_VAULT_MAX_ENTRY) return;
+  let totalSize = 0;
+  for (const e of RAW_VAULT.values()) totalSize += e.size;
+  while (totalSize + raw.length > RAW_VAULT_MAX_BYTES && RAW_VAULT.size > 0) {
+    let oldestKey = null, oldestTime = Infinity;
+    for (const [k, e] of RAW_VAULT) {
+      if (e.lastUsed < oldestTime) { oldestTime = e.lastUsed; oldestKey = k; }
+    }
+    if (oldestKey) {
+      totalSize -= RAW_VAULT.get(oldestKey).size;
+      RAW_VAULT.delete(oldestKey);
+    }
+  }
+  if (RAW_VAULT.size >= RAW_VAULT_MAX_ENTRIES) {
+    let oldestKey = null, oldestTime = Infinity;
+    for (const [k, e] of RAW_VAULT) {
+      if (e.lastUsed < oldestTime) { oldestTime = e.lastUsed; oldestKey = k; }
+    }
+    if (oldestKey) RAW_VAULT.delete(oldestKey);
+  }
+  RAW_VAULT.set(url, { raw, etag, lastModified, size: raw.length, lastUsed: Date.now() });
+}
+
 const chromeCipherAgent = new Agent({
   ciphers: [
     'TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256',
@@ -34,7 +73,6 @@ function getRandomUA() {
   return UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 }
 
-// 🛑 THE PROTOCOL GHOST (43-Byte Transparent GIF)
 const GHOST_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
 function sendGhost(res, cacheSeconds = 3600) {
@@ -60,7 +98,6 @@ function bypass(req, res, rawBody, statusCode = 200) {
 
 function detectContentType(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 2) return 'application/octet-stream';
-
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
   if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
   if (buffer.length >= 4 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
@@ -71,11 +108,9 @@ function detectContentType(buffer) {
     const brand = buffer.subarray(8, 12).toString('ascii');
     if (brand === 'avif' || brand === 'avis') return 'image/avif';
   }
-
   return 'application/octet-stream';
 }
 
-// 🛑 LOCAL CACHE ANCHOR (Deterministic ETag Generation)
 function generateETag(req, targetUrl) {
   const payload = JSON.stringify({
     url: targetUrl,
@@ -91,7 +126,6 @@ function generateETag(req, targetUrl) {
   return `"${crypto.createHash('md5').update(payload).digest('hex')}"`;
 }
 
-// 🛑 FETCH EXECUTOR (Tracks download size to prevent RAM bombs)
 function executeFetch(url, cfg, abortSignal) {
   const request = got(url, { ...cfg, signal: abortSignal });
   request.on('downloadProgress', (progress) => {
@@ -103,9 +137,6 @@ function executeFetch(url, cfg, abortSignal) {
   return request;
 }
 
-// 🛑 SURGICAL FIX: Removed pre-flight HEAD request.
-// The downloadProgress hook in executeFetch already catches RAM bombs mid-stream.
-// This eliminates 50-300ms of latency per cold fetch.
 function safeExecuteFetch(url, cfg, abortSignal) {
   return executeFetch(url, cfg, abortSignal);
 }
@@ -113,13 +144,10 @@ function safeExecuteFetch(url, cfg, abortSignal) {
 export default async function proxy(req, res) {
   const startTime = Date.now();
 
-  // 🛑 ZOMBIE EXORCIST (V8 Heap Suicidal Pill)
-  // If memory crosses 800MB, intentionally crash to force a fresh container.
   if (process.memoryUsage().heapUsed > 800 * 1024 * 1024) {
     process.exit(1);
   }
 
-  // 🛑 THE PHANTOM LIMB SEVERER
   const abortController = new AbortController();
   let isAborted = false;
   res.on('close', () => {
@@ -146,7 +174,6 @@ export default async function proxy(req, res) {
     return sendGhost(res, 60);
   }
 
-  // 🛑 LOCAL CACHE ANCHOR (304 Not Modified)
   const etag = generateETag(req, targetUrl);
   if (req.headers['if-none-match'] === etag) {
     return res.status(304).end();
@@ -154,14 +181,13 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
-  // 🛑 THE AUTOMATIC REFERER (Origin Injection)
   const queryReferer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
   let autoReferer = '';
   try {
     const parsedTarget = new URL(targetUrl);
     autoReferer = parsedTarget.origin;
   } catch {}
-  
+
   const finalReferer = (queryReferer && typeof queryReferer === 'string') ? queryReferer : autoReferer;
 
   const headers = {
@@ -177,6 +203,13 @@ export default async function proxy(req, res) {
     'sec-ch-ua-platform': '"Windows"',
     ...(finalReferer ? { referer: finalReferer } : {})
   };
+
+  // 🛑 THE UPSTREAM CONDITIONAL FETCHER (Check vault, add conditional headers)
+  const vaultEntry = vaultGet(targetUrl);
+  if (vaultEntry) {
+    if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
+    if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
+  }
 
   const config = {
     headers,
@@ -213,7 +246,6 @@ export default async function proxy(req, res) {
 
   if (workerBase && workerBase.startsWith('https://')) {
     const internalKey = process.env.INTERNAL_KEY;
-
     if (internalKey) {
       isWorkerFetch = true;
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
@@ -240,15 +272,13 @@ export default async function proxy(req, res) {
     statusCode = response.statusCode;
     responseHeaders = response.headers;
 
-    // 🛑 WORKER FALLBACK PROTOCOL (Worker 5xx triggers direct rescue)
     if (isWorkerFetch && statusCode >= 500 && statusCode < 600) {
       throw new Error('WORKER_5XX_FAILURE');
     }
   } catch (err) {
-    if (isAborted) return; // Client is gone, stop processing
-    
+    if (isAborted) return;
+
     if (isWorkerFetch) {
-      // 🛑 WORKER FALLBACK PROTOCOL (Direct-to-Origin Rescue)
       activeUrl = targetUrl;
       activeConfig = config;
       try {
@@ -264,7 +294,6 @@ export default async function proxy(req, res) {
     }
   }
 
-  // 🛑 403 RETRY PROTOCOL (Automated Hotlink Evasion)
   if (statusCode === 403) {
     const retryHeaders = { ...activeConfig.headers, 'user-agent': getRandomUA() };
     try {
@@ -273,18 +302,33 @@ export default async function proxy(req, res) {
       responseHeaders = response.headers;
     } catch (err) {
       if (isAborted) return;
-      // Retry failed, keep original 403
     }
   }
 
   try {
-    const rawBody = toBuffer(response.rawBody ?? response.body);
+    let rawBody;
+
+    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (304 Handling)
+    if (statusCode === 304 && vaultEntry) {
+      rawBody = vaultEntry.raw;
+      res.setHeader('X-Conditional-Fetch', '304_VAULT_HIT');
+    } else {
+      rawBody = toBuffer(response.rawBody ?? response.body);
+    }
 
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
       return sendGhost(res, 3600);
     }
 
-    // 🛑 ORIGIN OBEDIENCE PROTOCOL (Pass upstream max-age to Worker)
+    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (Store in vault on 200)
+    if (statusCode === 200 && rawBody.length <= RAW_VAULT_MAX_ENTRY) {
+      const upstreamEtag = responseHeaders['etag'] || null;
+      const upstreamLastModified = responseHeaders['last-modified'] || null;
+      if (upstreamEtag || upstreamLastModified) {
+        vaultSet(targetUrl, rawBody, upstreamEtag, upstreamLastModified);
+      }
+    }
+
     const upstreamCacheControl = responseHeaders['cache-control'] || '';
     const maxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
     if (maxAgeMatch) {
@@ -297,12 +341,13 @@ export default async function proxy(req, res) {
     if (statusCode === 404 || statusCode === 410) {
       return sendGhost(res, 86400);
     }
-    
+
     if (statusCode === 403) {
       return sendGhost(res, 3600);
     }
 
-    if (statusCode < 200 || statusCode >= 300) {
+    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (Do not reject 304)
+    if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) {
       return sendGhost(res, 60);
     }
 
@@ -312,13 +357,10 @@ export default async function proxy(req, res) {
       return sendGhost(res, 3600);
     }
 
-    // 🛑 THE SOCRATIC MIRROR (Deep Interrogation Mode)
     if (req.query?.debug === '1') {
       try {
-        // 🛑 SURGICAL FIX: Removed { animated: true } to avoid parsing all animation frames into memory.
         const sharpInstance = sharp(rawBody);
         const metadata = await sharpInstance.metadata();
-        
         const report = {
           status: statusCode,
           originType: detectedType,
@@ -335,7 +377,6 @@ export default async function proxy(req, res) {
           upstreamCacheControl: upstreamCacheControl,
           executionTimeMs: Date.now() - startTime
         };
-        
         return res.status(200).json(report);
       } catch (err) {
         return res.status(500).json({ error: 'Debug analysis failed', message: err.message });
@@ -347,17 +388,14 @@ export default async function proxy(req, res) {
 
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
     res.setHeader('Content-Type', detectedType);
-    
-    // 🛑 THE BANDWIDTH LEDGER (Pass upstream size to Worker)
+
     res.setHeader('x-upstream-content-length', String(rawBody.length));
-    
-    // 🛑 LOCAL CACHE ANCHOR (Set ETag & Allow Local Caching)
+
     res.setHeader('ETag', etag);
     res.setHeader('Cache-Control', 'private, max-age=86400');
 
     req.opts.originType = detectedType;
 
-    // 🛑 THE GENERATION SAVER (Magic Byte Bypass)
     const isModernFormat = detectedType === 'image/webp' || detectedType === 'image/avif';
     const isSmallFile = rawBody.length < 150 * 1024;
 
@@ -373,7 +411,7 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    if (isAborted) return; // Client disconnected, do nothing
+    if (isAborted) return;
 
     const isBodyTooLarge =
       error.message === 'BODY_TOO_LARGE' ||
@@ -394,4 +432,4 @@ export default async function proxy(req, res) {
 
     return sendGhost(res, 60);
   }
-      }
+}
