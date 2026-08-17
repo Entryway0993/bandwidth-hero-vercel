@@ -1,5 +1,9 @@
 import { parseSafeUrl } from './urlGuard.js';
 
+// 🛑 SURGICAL FIX: Module-level regex constants prevent V8 recompilation on every request.
+const PROTOCOL_REGEX = /^https?:\/\//i;
+const HIDDEN_URL_REGEX = /[?&]url=(.+?)(?:[&\s]|$)/;
+
 const clampInt = (value, fallback, min, max) => {
   const n = parseInt(value, 10);
   return Number.isNaN(n) ? fallback : Math.min(Math.max(n, min), max);
@@ -78,7 +82,8 @@ function extractHiddenUrl(req) {
       ? String(value[0] || '')
       : String(value);
 
-    const urlMatch = authGarbage.match(/[?&]url=([^&]+)/);
+    // 🛑 SURGICAL FIX: Lazy match preserves target URLs with their own query params.
+    const urlMatch = authGarbage.match(HIDDEN_URL_REGEX);
 
     if (urlMatch) {
       try {
@@ -126,7 +131,8 @@ function params(req, res, next) {
       return res.status(200).send('bandwidth-hero-proxy');
     }
 
-    if (!/^https?:\/\//i.test(url)) {
+    // 🛑 SURGICAL FIX: Use module-level compiled regex.
+    if (!PROTOCOL_REGEX.test(url)) {
       return res.status(400).json({
         error: 'Invalid URL. Must include protocol (http or https).'
       });
