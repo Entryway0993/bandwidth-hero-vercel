@@ -1,5 +1,11 @@
 import sharp from 'sharp';
 import { createHash } from 'crypto';
+import { PassThrough } from 'stream';
+import os from 'os';
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
 
 const MAX_OUTPUT_DIM = parseInt(process.env.MAX_OUTPUT_DIM) || 2048;
 const DEFAULT_QUALITY = parseInt(process.env.DEFAULT_QUALITY) || 75;
@@ -8,12 +14,207 @@ const PHOTO_QUALITY = parseInt(process.env.PHOTO_QUALITY) || 70;
 const MAX_STRIP_WIDTH = parseInt(process.env.MAX_STRIP_WIDTH) || 1200;
 const MAX_ANIMATION_FRAMES = parseInt(process.env.MAX_ANIMATION_FRAMES) || 50;
 const VIEWPORT_FALLBACK = parseInt(process.env.VIEWPORT_FALLBACK) || 1080;
+const HEALTH_LAG_THRESHOLD = parseInt(process.env.HEALTH_LAG_THRESHOLD) || 100;
+const SHUTDOWN_TIMEOUT = parseInt(process.env.SHUTDOWN_TIMEOUT) || 10000;
+
+// ============================================================
+// FEATURE 1: THE ORACLE'S LEDGER (Global Telemetry)
+// ============================================================
+
+const metrics = {
+  startTime: Date.now(),
+  totalRequests: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  totalBytesIn: 0,
+  totalBytesOut: 0,
+  totalBytesSaved: 0,
+  totalEncodeTime: 0,
+  encodeCount: 0,
+  semaphoreRejections: 0,
+  voidDetections: 0,
+  encodingFailures: 0,
+  formatCounts: { avif: 0, webp: 0, jpeg: 0, png: 0 },
+  featureActivations: {
+    ditherAssassin: 0,
+    bandingExorcist: 0,
+    moireRemoval: 0,
+    lineDenoise: 0,
+    luminanceFix: 0,
+    ghostStripper: 0,
+    deskew: 0,
+    alphaSentinel: 0,
+    quantumSorcerer: 0,
+    formatDuelist: 0,
+    metadataReaper: 0,
+    streamReaper: 0,
+    lorekeeper: 0,
+  },
+  chronosStateHistory: [],
+};
+
+function recordMetric(key, value = 1) {
+  if (metrics.featureActivations[key] !== undefined) {
+    metrics.featureActivations[key] += value;
+  }
+}
+
+export function getMetrics() {
+  const uptime = Date.now() - metrics.startTime;
+  const avgEncodeTime = metrics.encodeCount > 0
+    ? Math.round(metrics.totalEncodeTime / metrics.encodeCount)
+    : 0;
+  const cacheHitRate = metrics.totalRequests > 0
+    ? ((metrics.cacheHits / metrics.totalRequests) * 100).toFixed(2) + '%'
+    : '0%';
+  const compressionRatio = metrics.totalBytesIn > 0
+    ? ((1 - metrics.totalBytesOut / metrics.totalBytesIn) * 100).toFixed(2) + '%'
+    : '0%';
+
+  return {
+    uptime: `${Math.floor(uptime / 1000)}s`,
+    totalRequests: metrics.totalRequests,
+    cacheHits: metrics.cacheHits,
+    cacheMisses: metrics.cacheMisses,
+    cacheHitRate,
+    totalBytesIn: `${(metrics.totalBytesIn / 1024 / 1024).toFixed(2)}MB`,
+    totalBytesOut: `${(metrics.totalBytesOut / 1024 / 1024).toFixed(2)}MB`,
+    totalBytesSaved: `${(metrics.totalBytesSaved / 1024 / 1024).toFixed(2)}MB`,
+    compressionRatio,
+    avgEncodeTime: `${avgEncodeTime}ms`,
+    semaphoreRejections: metrics.semaphoreRejections,
+    voidDetections: metrics.voidDetections,
+    encodingFailures: metrics.encodingFailures,
+    formatCounts: metrics.formatCounts,
+    featureActivations: metrics.featureActivations,
+    activeEncodes,
+    activeRequests,
+    isShuttingDown,
+  };
+}
+
+// ============================================================
+// FEATURE 2: THE HEARTBEAT SENTINEL (Event Loop Lag Detection)
+// ============================================================
+
+export function checkHealth() {
+  return new Promise((resolve) => {
+    const start = process.hrtime.bigint();
+    setImmediate(() => {
+      const lag = Number(process.hrtime.bigint() - start) / 1e6;
+      const healthy = lag < HEALTH_LAG_THRESHOLD;
+      resolve({
+        healthy,
+        eventLoopLag: `${lag.toFixed(2)}ms`,
+        threshold: `${HEALTH_LAG_THRESHOLD}ms`,
+        uptime: `${Math.floor(process.uptime())}s`,
+        activeRequests,
+        activeEncodes,
+        isShuttingDown,
+      });
+    });
+  });
+}
+
+// ============================================================
+// FEATURE 3: THE GUILLOTINE'S GRACE (Graceful Shutdown)
+// ============================================================
+
+let activeRequests = 0;
+let isShuttingDown = false;
+
+function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[GUILLOTINE-GRACE] ${signal} received. Shutting down gracefully.`);
+  console.log(`[GUILLOTINE-GRACE] Active requests: ${activeRequests}, Active encodes: ${activeEncodes}`);
+
+  const forceTimeout = setTimeout(() => {
+    console.log('[GUILLOTINE-GRACE] Timeout reached. Forcing shutdown.');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT);
+
+  const checkInterval = setInterval(() => {
+    console.log(`[GUILLOTINE-GRACE] Waiting... active requests: ${activeRequests}, active encodes: ${activeEncodes}`);
+    if (activeRequests === 0 && activeEncodes === 0) {
+      clearTimeout(forceTimeout);
+      clearInterval(checkInterval);
+      console.log('[GUILLOTINE-GRACE] All requests completed. Exiting with dignity.');
+      process.exit(0);
+    }
+  }, 100);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// ============================================================
+// CACHES
+// ============================================================
 
 const perceptualCache = new Map();
 const PERCEPTUAL_CACHE_MAX = 500;
 
 const lorekeeperCache = new Map();
 const LOREKEEPER_CACHE_MAX = 200;
+
+// ============================================================
+// FEATURE: THE SEMAPHORE WARDEN (Concurrency Control)
+// ============================================================
+
+const CPU_CORES = os.cpus().length;
+const MAX_CONCURRENT_ENCODES = parseInt(process.env.MAX_CONCURRENT_ENCODES) || Math.max(2, CPU_CORES);
+let activeEncodes = 0;
+
+function acquireSemaphore() {
+  if (isShuttingDown) return false;
+  if (activeEncodes >= MAX_CONCURRENT_ENCODES) return false;
+  activeEncodes++;
+  return true;
+}
+
+function releaseSemaphore() {
+  if (activeEncodes > 0) activeEncodes--;
+}
+
+// ============================================================
+// FEATURE: THE CHRONOS SCRIBE (Adaptive Effort)
+// ============================================================
+
+const rollingEncodeTimes = [];
+const ROLLING_WINDOW = 20;
+
+function recordEncodeTime(ms) {
+  rollingEncodeTimes.push(ms);
+  if (rollingEncodeTimes.length > ROLLING_WINDOW) {
+    rollingEncodeTimes.shift();
+  }
+}
+
+function getAverageEncodeTime() {
+  if (rollingEncodeTimes.length === 0) return 0;
+  return rollingEncodeTimes.reduce((a, b) => a + b, 0) / rollingEncodeTimes.length;
+}
+
+function getChronosState() {
+  const avg = getAverageEncodeTime();
+  let state, effort;
+  if (avg > 1000) { state = 'CRITICAL'; effort = 1; }
+  else if (avg > 600) { state = 'HOT'; effort = 2; }
+  else if (avg > 300) { state = 'WARM'; effort = 3; }
+  else { state = 'COLD'; effort = 4; }
+
+  metrics.chronosStateHistory.push({ state, effort, avg: Math.round(avg), time: Date.now() });
+  if (metrics.chronosStateHistory.length > 100) {
+    metrics.chronosStateHistory.shift();
+  }
+
+  return { state, effort };
+}
+
+// ============================================================
+// ENVIRONMENT TOGGLES
+// ============================================================
 
 function envBool(name, fallback = false) {
   const v = process.env[name];
@@ -42,6 +243,22 @@ const ENABLE_LAYOUT_PROPHET = envBool('ENABLE_LAYOUT_PROPHET', true);
 const ENABLE_ENCODING_VERIFIER = envBool('ENABLE_ENCODING_VERIFIER', true);
 const ENABLE_GHOST_STRIPPER = envBool('ENABLE_GHOST_STRIPPER', true);
 const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', true);
+const ENABLE_METADATA_REAPER = envBool('ENABLE_METADATA_REAPER', true);
+const ENABLE_WEBP_PRESET = envBool('ENABLE_WEBP_PRESET', true);
+const ENABLE_PROGRESSIVE_PNG = envBool('ENABLE_PROGRESSIVE_PNG', true);
+const ENABLE_STREAM_REAPER = envBool('ENABLE_STREAM_REAPER', true);
+const ENABLE_TIMEOUT_GUILLOTINE = envBool('ENABLE_TIMEOUT_GUILLOTINE', true);
+const ENABLE_DIMENSION_OVERLORD = envBool('ENABLE_DIMENSION_OVERLORD', true);
+const ENABLE_SEMAPHORE_WARDEN = envBool('ENABLE_SEMAPHORE_WARDEN', true);
+const ENABLE_QUANTUM_SORCERER = envBool('ENABLE_QUANTUM_SORCERER', true);
+const ENABLE_CHRONOS_SCRIBE = envBool('ENABLE_CHRONOS_SCRIBE', true);
+const ENABLE_ORACLE_LEDGER = envBool('ENABLE_ORACLE_LEDGER', true);
+const ENABLE_HEARTBEAT_SENTINEL = envBool('ENABLE_HEARTBEAT_SENTINEL', true);
+const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
 
 async function generatePerceptualHash(buffer) {
   try {
@@ -325,7 +542,6 @@ function verifyOutput(buffer, format) {
   }
 }
 
-// --- FEATURE 3: THE FORMAT DUELIST ---
 async function formatDuel(buffer, targetQuality) {
   try {
     const sample = await sharp(buffer)
@@ -348,6 +564,15 @@ async function formatDuel(buffer, targetQuality) {
   } catch {
     return { winner: 'avif', avifSize: 0, webpSize: 0 };
   }
+}
+
+function getWebpPreset(analysis, lineArtResult, origW, origH) {
+  if (!ENABLE_WEBP_PRESET) return 'default';
+  if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) return 'drawing';
+  if (analysis.isAnime) return 'picture';
+  if (analysis.entropy > 7.5) return 'photo';
+  if (origW < 256 && origH < 256) return 'icon';
+  return 'default';
 }
 
 function judgeQuality(analysis, metadata) {
@@ -594,13 +819,86 @@ function getChromaSubsampling(analysis) {
   return '4:2:0';
 }
 
+// ============================================================
+// MAIN COMPRESS FUNCTION
+// ============================================================
+
 export default async function compress(req, res, buffer) {
+  // --- FEATURE 3: THE GUILLOTINE'S GRACE ---
+  if (isShuttingDown) {
+    res.status(503);
+    res.setHeader('X-Guillotine-Grace', 'SHUTTING_DOWN');
+    res.setHeader('Retry-After', '10');
+    return Buffer.alloc(0);
+  }
+
+  activeRequests++;
+
+  // --- FEATURE 1: THE ORACLE'S LEDGER ---
+  if (ENABLE_ORACLE_LEDGER) {
+    metrics.totalRequests++;
+    metrics.totalBytesIn += buffer.length;
+  }
+
+  const abortController = new AbortController();
+  const { signal } = abortController;
+
+  let clientDisconnected = false;
+
+  if (ENABLE_TIMEOUT_GUILLOTINE) {
+    req.on('close', () => {
+      clientDisconnected = true;
+      abortController.abort();
+    });
+
+    res.on('close', () => {
+      clientDisconnected = true;
+      abortController.abort();
+    });
+  }
+
   try {
+    if (signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      res.status(499);
+      return Buffer.alloc(0);
+    }
+
     const metadata = await sharp(buffer).metadata();
     const format = metadata.format;
 
     if (!format || format === 'raw') {
       return buffer;
+    }
+
+    if (ENABLE_DIMENSION_OVERLORD) {
+      const MAX_DIMENSION = 16383;
+      const MAX_ASPECT_RATIO = 50;
+
+      const width = metadata.width || 0;
+      const height = metadata.height || 0;
+
+      if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        res.status(413);
+        res.setHeader('X-Dimension-Overlord', 'REJECTED_DIMENSION');
+        return Buffer.alloc(0);
+      }
+
+      const minDim = Math.max(1, Math.min(width, height));
+      const maxDim = Math.max(width, height);
+      const aspectRatio = maxDim / minDim;
+
+      if (aspectRatio > MAX_ASPECT_RATIO) {
+        res.status(413);
+        res.setHeader('X-Dimension-Overlord', 'REJECTED_ASPECT');
+        return Buffer.alloc(0);
+      }
+    }
+
+    if (signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      res.status(499);
+      return Buffer.alloc(0);
     }
 
     let thumbResult = null;
@@ -610,8 +908,18 @@ export default async function compress(req, res, buffer) {
       if (ENABLE_VOID_WATCHER && thumbResult.isVoid) {
         res.setHeader('X-Void', 'TRUE');
         res.setHeader('Content-Type', `image/${format}`);
+        if (ENABLE_ORACLE_LEDGER) {
+          metrics.voidDetections++;
+          metrics.totalBytesOut += buffer.length;
+        }
         return buffer;
       }
+    }
+
+    if (signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      res.status(499);
+      return Buffer.alloc(0);
     }
 
     let loreHash = null;
@@ -629,6 +937,10 @@ export default async function compress(req, res, buffer) {
           if (loreCached.palette && loreCached.palette.length > 0) {
             res.setHeader('X-Palette', loreCached.palette.join(','));
           }
+          if (ENABLE_ORACLE_LEDGER) {
+            metrics.totalBytesOut += loreCached.buffer.length;
+            metrics.totalBytesSaved += buffer.length - loreCached.buffer.length;
+          }
           return loreCached.buffer;
         }
       }
@@ -645,368 +957,622 @@ export default async function compress(req, res, buffer) {
       if (cachedResult.palette && cachedResult.palette.length > 0) {
         res.setHeader('X-Palette', cachedResult.palette.join(','));
       }
+      if (ENABLE_ORACLE_LEDGER) {
+        metrics.cacheHits++;
+        metrics.totalBytesOut += cachedResult.buffer.length;
+        metrics.totalBytesSaved += buffer.length - cachedResult.buffer.length;
+      }
       return cachedResult.buffer;
     }
 
-    const analysis = await detectImageType(buffer, metadata);
-    const viewportMaxDim = getViewportMaxDim(req);
-
-    let placeholder = thumbResult ? thumbResult.placeholder : null;
-    let palette = thumbResult ? thumbResult.palette : [];
-
-    if (ENABLE_PALETTE && palette.length > 0) {
-      res.setHeader('X-Palette', palette.join(','));
+    if (ENABLE_ORACLE_LEDGER) {
+      metrics.cacheMisses++;
     }
 
-    let skewAngle = 0;
-    if (ENABLE_DESKEW && !analysis.isMangaStrip) {
-      skewAngle = await detectSkew(buffer);
-      if (skewAngle !== 0) {
-        res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
-      }
+    if (signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      res.status(499);
+      return Buffer.alloc(0);
     }
 
-    let judgeResult = null;
-    if (ENABLE_JUDGE) {
-      judgeResult = judgeQuality(analysis, metadata);
-    }
-
-    let halftoneResult = null;
-    if (ENABLE_MOIRE) {
-      halftoneResult = await detectHalftone(buffer, metadata, analysis);
-    }
-
-    let lineArtResult = null;
-    if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
-      lineArtResult = await detectLineArt(buffer, analysis);
-    }
-
-    let alphaStrippable = false;
-    const isAnimated = metadata.pages > 1;
-    if (ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
-      alphaStrippable = await detectAlphaStrippable(buffer, metadata);
-      if (alphaStrippable) {
-        res.setHeader('X-Alpha-Sentinel', 'STRIPPED');
-      }
-    }
-
-    const requestedFormat = req.query.f || req.query.format;
-    let outputFormat = 'jpeg';
-
-    if (FORCE_JPEG) {
-      outputFormat = 'jpeg';
-    } else if (requestedFormat === 'avif' && ENABLE_AVIF) {
-      outputFormat = 'avif';
-    } else if (requestedFormat === 'webp' && ENABLE_WEBP) {
-      outputFormat = 'webp';
-    } else if (!requestedFormat) {
-      const accept = req.headers.accept || '';
-      const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
-      const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
-
-      // --- FEATURE 3: THE FORMAT DUELIST ---
-      if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
-        const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
-        let quality = calculateQuality(analysis, baseQuality);
-        if (judgeResult) {
-          quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
+    // --- FEATURE: THE SEMAPHORE WARDEN ---
+    let semaphoreAcquired = false;
+    if (ENABLE_SEMAPHORE_WARDEN) {
+      semaphoreAcquired = acquireSemaphore();
+      if (!semaphoreAcquired) {
+        res.status(503);
+        res.setHeader('X-Semaphore-Warden', 'SATURATED');
+        res.setHeader('X-Active-Encodes', `${activeEncodes}/${MAX_CONCURRENT_ENCODES}`);
+        res.setHeader('Retry-After', '5');
+        if (ENABLE_ORACLE_LEDGER) {
+          metrics.semaphoreRejections++;
         }
-
-        const duel = await formatDuel(buffer, quality);
-        outputFormat = duel.winner;
-        res.setHeader('X-Format-Duelist', `${duel.winner.toUpperCase()} (AVIF:${duel.avifSize} vs WebP:${duel.webpSize})`);
-      } else if (acceptsAvif) {
-        outputFormat = 'avif';
-      } else if (acceptsWebp) {
-        outputFormat = 'webp';
-      }
-    } else if (requestedFormat === 'jpeg' || requestedFormat === 'jpg') {
-      outputFormat = 'jpeg';
-    } else if (requestedFormat === 'png') {
-      outputFormat = 'png';
-    }
-
-    const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
-    let quality = calculateQuality(analysis, baseQuality);
-
-    if (judgeResult) {
-      quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
-    }
-
-    const frameCount = metadata.pages || 1;
-
-    if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
-      res.setHeader('X-Frame-Cap', 'TRUNCATED');
-      return buffer;
-    }
-
-    let ditherAssassinActive = false;
-    if (ENABLE_DITHER_ASSASSIN && lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !isAnimated) {
-      ditherAssassinActive = true;
-    }
-
-    let bandingExorcistActive = false;
-    if (ENABLE_BANDING_EXORCIST && !ditherAssassinActive && !isAnimated) {
-      if (analysis.stdevLuminance > 20 && analysis.stdevLuminance < 50 && analysis.sharpness < 30) {
-        bandingExorcistActive = true;
-      }
-    }
-
-    let pipeline = sharp(buffer, {
-      animated: isAnimated,
-      limitInputPixels: 268402689,
-    });
-
-    pipeline = pipeline.withMetadata({
-      orientation: metadata.orientation || 1,
-    });
-
-    pipeline = pipeline.toColourspace('srgb');
-
-    if (FORCE_GRAYSCALE || (analysis.isGrayscale && !analysis.isColorful)) {
-      pipeline = pipeline.grayscale();
-    }
-
-    if (ENABLE_LUMINANCE && !isAnimated && !ditherAssassinActive) {
-      if (analysis.meanLuminance < 85 && analysis.stdevLuminance < 50) {
-        pipeline = pipeline.gamma(1.4);
-        res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
-      } else if (analysis.meanLuminance > 210 && analysis.stdevLuminance < 50) {
-        pipeline = pipeline.gamma(0.7);
-        res.setHeader('X-Luminance-Fix', 'OVEREXPOSED');
-      }
-    }
-
-    // --- FEATURE 2: THE GHOST STRIPPER (White-Point Normalization) ---
-    if (ENABLE_GHOST_STRIPPER && !isAnimated && !ditherAssassinActive) {
-      if (analysis.meanLuminance > 150 && analysis.maxLuminance > 200 && analysis.maxLuminance < 253) {
-        const stretch = 255 / analysis.maxLuminance;
-        pipeline = pipeline.linear(stretch, 0);
-        res.setHeader('X-Ghost-Stripper', `STRETCHED (max:${analysis.maxLuminance} -> 255)`);
-      }
-    }
-
-    if (ENABLE_DESKEW && skewAngle !== 0) {
-      pipeline = pipeline.rotate(skewAngle, {
-        background: analysis.isGrayscale ? { r: 255, g: 255, b: 255 } : { r: 255, g: 255, b: 255, alpha: 0 },
-      });
-    }
-
-    if (halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
-      pipeline = pipeline.median(3);
-      res.setHeader('X-Moire-Removed', 'true');
-    }
-
-    if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !ditherAssassinActive) {
-      pipeline = pipeline.median(3);
-      pipeline = pipeline.sharpen({
-        sigma: 0.6,
-        flat: 3.0,
-        jagged: 1.5,
-      });
-      res.setHeader('X-Line-Denoise', 'true');
-    }
-
-    let targetWidth = null;
-    let targetHeight = null;
-
-    const { width: origW, height: origH } = metadata;
-
-    if (analysis.isMangaStrip) {
-      if (origW > MAX_STRIP_WIDTH) {
-        targetWidth = MAX_STRIP_WIDTH;
-      }
-    } else {
-      if (origW > viewportMaxDim || origH > viewportMaxDim) {
-        const scale = Math.min(viewportMaxDim / origW, viewportMaxDim / origH);
-        targetWidth = Math.round(origW * scale);
-        targetHeight = Math.round(origH * scale);
-      }
-    }
-
-    if (ENABLE_LAYOUT_PROPHET) {
-      let outW = origW;
-      let outH = origH;
-
-      if (targetWidth && targetHeight) {
-        outW = targetWidth;
-        outH = targetHeight;
-      } else if (targetWidth) {
-        outW = targetWidth;
-        outH = Math.round(origH * (targetWidth / origW));
-      } else if (targetHeight) {
-        outH = targetHeight;
-        outW = Math.round(origW * (targetHeight / origH));
-      }
-
-      const aspectRatio = (outW / outH).toFixed(4);
-      const orientation = outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square';
-
-      res.setHeader('X-Output-Width', String(outW));
-      res.setHeader('X-Output-Height', String(outH));
-      res.setHeader('X-Aspect-Ratio', aspectRatio);
-      res.setHeader('X-Orientation', orientation);
-    }
-
-    if (targetWidth || targetHeight) {
-      pipeline = pipeline.resize(targetWidth, targetHeight, {
-        fit: 'inside',
-        withoutEnlargement: true,
-        kernel: sharp.kernel.lanczos3,
-      });
-    }
-
-    if (analysis.sharpness < 50 && !analysis.isMangaStrip && !ditherAssassinActive) {
-      const alreadySharpened = lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85;
-      if (!alreadySharpened) {
-        pipeline = pipeline.sharpen({
-          sigma: 0.8,
-          flat: 2.0,
-          jagged: 1.0,
-        });
-      }
-    }
-
-    if (alphaStrippable) {
-      pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
-    } else if (STRIP_ALPHA && outputFormat === 'jpeg' && !ditherAssassinActive) {
-      pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
-    }
-
-    if (bandingExorcistActive) {
-      const noiseTile = await createNoiseTile();
-      pipeline = pipeline.composite([{
-        input: noiseTile,
-        tile: true,
-        blend: 'over',
-      }]);
-      res.setHeader('X-Banding-Exorcist', 'ACTIVE');
-    }
-
-    let outputBuffer;
-    let contentType;
-
-    if (ditherAssassinActive) {
-      pipeline = pipeline.threshold(128);
-
-      outputBuffer = await pipeline.png({
-        palette: true,
-        colours: 2,
-        compressionLevel: 9,
-        dither: 0,
-      }).toBuffer();
-      contentType = 'image/png';
-      res.setHeader('X-Dither-Assassin', 'ACTIVE');
-    } else {
-      const chromaSubsampling = getChromaSubsampling(analysis);
-
-      switch (outputFormat) {
-        case 'avif':
-          outputBuffer = await pipeline.avif({
-            quality: Math.min(quality, 63),
-            effort: 4,
-            chromaSubsampling: chromaSubsampling,
-          }).toBuffer();
-          contentType = 'image/avif';
-          break;
-
-        case 'webp':
-          outputBuffer = await pipeline.webp({
-            quality: quality,
-            effort: 4,
-            smartSubsample: true,
-          }).toBuffer();
-          contentType = 'image/webp';
-          break;
-
-        case 'png':
-          outputBuffer = await pipeline.png({
-            compressionLevel: 8,
-            palette: analysis.isGrayscale,
-            quality: quality,
-          }).toBuffer();
-          contentType = 'image/png';
-          break;
-
-        case 'jpeg':
-        default:
-          outputBuffer = await pipeline.jpeg({
-            quality: quality,
-            progressive: true,
-            mozjpeg: true,
-            chromaSubsampling: chromaSubsampling,
-            trellisQuantisation: true,
-            overshootDeringing: true,
-            optimiseScans: true,
-          }).toBuffer();
-          contentType = 'image/jpeg';
-          break;
-      }
-    }
-
-    if (ENABLE_ENCODING_VERIFIER) {
-      if (!verifyOutput(outputBuffer, outputFormat)) {
-        res.setHeader('X-Encoding-Verifier', 'FAILED');
-        res.status(404);
         return Buffer.alloc(0);
       }
-      res.setHeader('X-Encoding-Verifier', 'PASSED');
+      res.setHeader('X-Semaphore-Warden', 'ACTIVE');
+      res.setHeader('X-Active-Encodes', `${activeEncodes}/${MAX_CONCURRENT_ENCODES}`);
     }
 
-    if (outputBuffer.length >= buffer.length) {
-      res.setHeader('X-Compression', 'SKIPPED');
-      res.setHeader('Content-Type', `image/${format}`);
-      if (placeholder) res.setHeader('X-Placeholder', placeholder);
-      if (judgeResult) res.setHeader('X-Quality-Grade', judgeResult.grade);
-      if (palette.length > 0) res.setHeader('X-Palette', palette.join(','));
-      return buffer;
-    }
+    try {
+      const analysis = await detectImageType(buffer, metadata);
+      const viewportMaxDim = getViewportMaxDim(req);
 
-    if (ENABLE_LOREKEEPER && outputFormat === 'png' && !loreHit && !ditherAssassinActive) {
-      const newLoreHash = generateLoreHash(buffer);
-      outputBuffer = await embedLoreSignature(outputBuffer, newLoreHash);
-      setLoreCache(newLoreHash, {
+      let placeholder = thumbResult ? thumbResult.placeholder : null;
+      let palette = thumbResult ? thumbResult.palette : [];
+
+      if (ENABLE_PALETTE && palette.length > 0) {
+        res.setHeader('X-Palette', palette.join(','));
+      }
+
+      let skewAngle = 0;
+      if (ENABLE_DESKEW && !analysis.isMangaStrip) {
+        skewAngle = await detectSkew(buffer);
+        if (skewAngle !== 0) {
+          res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
+          recordMetric('deskew');
+        }
+      }
+
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
+      }
+
+      let judgeResult = null;
+      if (ENABLE_JUDGE) {
+        judgeResult = judgeQuality(analysis, metadata);
+      }
+
+      let halftoneResult = null;
+      if (ENABLE_MOIRE) {
+        halftoneResult = await detectHalftone(buffer, metadata, analysis);
+      }
+
+      let lineArtResult = null;
+      if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
+        lineArtResult = await detectLineArt(buffer, analysis);
+      }
+
+      let alphaStrippable = false;
+      const isAnimated = metadata.pages > 1;
+      if (ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
+        alphaStrippable = await detectAlphaStrippable(buffer, metadata);
+        if (alphaStrippable) {
+          res.setHeader('X-Alpha-Sentinel', 'STRIPPED');
+          recordMetric('alphaSentinel');
+        }
+      }
+
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
+      }
+
+      const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
+      const adaptiveEffort = chronos.effort;
+
+      const requestedFormat = req.query.f || req.query.format;
+      let outputFormat = 'jpeg';
+
+      if (FORCE_JPEG) {
+        outputFormat = 'jpeg';
+      } else if (requestedFormat === 'avif' && ENABLE_AVIF) {
+        outputFormat = 'avif';
+      } else if (requestedFormat === 'webp' && ENABLE_WEBP) {
+        outputFormat = 'webp';
+      } else if (!requestedFormat) {
+        const accept = req.headers.accept || '';
+        const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
+        const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
+
+        if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
+          const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
+          let quality = calculateQuality(analysis, baseQuality);
+          if (judgeResult) {
+            quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
+          }
+
+          const duel = await formatDuel(buffer, quality);
+          outputFormat = duel.winner;
+          res.setHeader('X-Format-Duelist', `${duel.winner.toUpperCase()} (AVIF:${duel.avifSize} vs WebP:${duel.webpSize})`);
+          recordMetric('formatDuelist');
+        } else if (acceptsAvif) {
+          outputFormat = 'avif';
+        } else if (acceptsWebp) {
+          outputFormat = 'webp';
+        }
+      } else if (requestedFormat === 'jpeg' || requestedFormat === 'jpg') {
+        outputFormat = 'jpeg';
+      } else if (requestedFormat === 'png') {
+        outputFormat = 'png';
+      }
+
+      const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
+      let quality = calculateQuality(analysis, baseQuality);
+
+      if (judgeResult) {
+        quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
+      }
+
+      const frameCount = metadata.pages || 1;
+
+      if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
+        res.setHeader('X-Frame-Cap', 'TRUNCATED');
+        if (ENABLE_ORACLE_LEDGER) {
+          metrics.totalBytesOut += buffer.length;
+        }
+        return buffer;
+      }
+
+      let ditherAssassinActive = false;
+      if (ENABLE_DITHER_ASSASSIN && lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !isAnimated) {
+        ditherAssassinActive = true;
+        recordMetric('ditherAssassin');
+      }
+
+      let bandingExorcistActive = false;
+      if (ENABLE_BANDING_EXORCIST && !ditherAssassinActive && !isAnimated) {
+        if (analysis.stdevLuminance > 20 && analysis.stdevLuminance < 50 && analysis.sharpness < 30) {
+          bandingExorcistActive = true;
+          recordMetric('bandingExorcist');
+        }
+      }
+
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
+      }
+
+      let pipeline = sharp(buffer, {
+        animated: isAnimated,
+        limitInputPixels: 268402689,
+      });
+
+      if (ENABLE_METADATA_REAPER) {
+        pipeline = pipeline.rotate();
+        recordMetric('metadataReaper');
+      } else {
+        pipeline = pipeline.withMetadata({
+          orientation: metadata.orientation || 1,
+        });
+      }
+
+      pipeline = pipeline.toColourspace('srgb');
+
+      if (FORCE_GRAYSCALE || (analysis.isGrayscale && !analysis.isColorful)) {
+        pipeline = pipeline.grayscale();
+      }
+
+      if (ENABLE_LUMINANCE && !isAnimated && !ditherAssassinActive) {
+        if (analysis.meanLuminance < 85 && analysis.stdevLuminance < 50) {
+          pipeline = pipeline.gamma(1.4);
+          res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
+          recordMetric('luminanceFix');
+        } else if (analysis.meanLuminance > 210 && analysis.stdevLuminance < 50) {
+          pipeline = pipeline.gamma(0.7);
+          res.setHeader('X-Luminance-Fix', 'OVEREXPOSED');
+          recordMetric('luminanceFix');
+        }
+      }
+
+      if (ENABLE_GHOST_STRIPPER && !isAnimated && !ditherAssassinActive) {
+        if (analysis.meanLuminance > 150 && analysis.maxLuminance > 200 && analysis.maxLuminance < 253) {
+          const stretch = 255 / analysis.maxLuminance;
+          pipeline = pipeline.linear(stretch, 0);
+          res.setHeader('X-Ghost-Stripper', `STRETCHED (max:${analysis.maxLuminance} -> 255)`);
+          recordMetric('ghostStripper');
+        }
+      }
+
+      if (ENABLE_DESKEW && skewAngle !== 0) {
+        pipeline = pipeline.rotate(skewAngle, {
+          background: analysis.isGrayscale ? { r: 255, g: 255, b: 255 } : { r: 255, g: 255, b: 255, alpha: 0 },
+        });
+      }
+
+      if (halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
+        pipeline = pipeline.median(3);
+        res.setHeader('X-Moire-Removed', 'true');
+        recordMetric('moireRemoval');
+      }
+
+      if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !ditherAssassinActive) {
+        pipeline = pipeline.median(3);
+        pipeline = pipeline.sharpen({
+          sigma: 0.6,
+          flat: 3.0,
+          jagged: 1.5,
+        });
+        res.setHeader('X-Line-Denoise', 'true');
+        recordMetric('lineDenoise');
+      }
+
+      let targetWidth = null;
+      let targetHeight = null;
+
+      const { width: origW, height: origH } = metadata;
+
+      if (analysis.isMangaStrip) {
+        if (origW > MAX_STRIP_WIDTH) {
+          targetWidth = MAX_STRIP_WIDTH;
+        }
+      } else {
+        if (origW > viewportMaxDim || origH > viewportMaxDim) {
+          const scale = Math.min(viewportMaxDim / origW, viewportMaxDim / origH);
+          targetWidth = Math.round(origW * scale);
+          targetHeight = Math.round(origH * scale);
+        }
+      }
+
+      if (ENABLE_LAYOUT_PROPHET) {
+        let outW = origW;
+        let outH = origH;
+
+        if (targetWidth && targetHeight) {
+          outW = targetWidth;
+          outH = targetHeight;
+        } else if (targetWidth) {
+          outW = targetWidth;
+          outH = Math.round(origH * (targetWidth / origW));
+        } else if (targetHeight) {
+          outH = targetHeight;
+          outW = Math.round(origW * (targetHeight / origH));
+        }
+
+        const aspectRatio = (outW / outH).toFixed(4);
+        const orientation = outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square';
+
+        res.setHeader('X-Output-Width', String(outW));
+        res.setHeader('X-Output-Height', String(outH));
+        res.setHeader('X-Aspect-Ratio', aspectRatio);
+        res.setHeader('X-Orientation', orientation);
+      }
+
+      if (targetWidth || targetHeight) {
+        pipeline = pipeline.resize(targetWidth, targetHeight, {
+          fit: 'inside',
+          withoutEnlargement: true,
+          kernel: sharp.kernel.lanczos3,
+        });
+      }
+
+      if (analysis.sharpness < 50 && !analysis.isMangaStrip && !ditherAssassinActive) {
+        const alreadySharpened = lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85;
+        if (!alreadySharpened) {
+          pipeline = pipeline.sharpen({
+            sigma: 0.8,
+            flat: 2.0,
+            jagged: 1.0,
+          });
+        }
+      }
+
+      if (alphaStrippable) {
+        pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+      } else if (STRIP_ALPHA && outputFormat === 'jpeg' && !ditherAssassinActive) {
+        pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+      }
+
+      if (bandingExorcistActive) {
+        const noiseTile = await createNoiseTile();
+        pipeline = pipeline.composite([{
+          input: noiseTile,
+          tile: true,
+          blend: 'over',
+        }]);
+        res.setHeader('X-Banding-Exorcist', 'ACTIVE');
+      }
+
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
+      }
+
+      let outputBuffer;
+      let contentType;
+
+      const encodeStart = Date.now();
+
+      const needsBuffer = ENABLE_ENCODING_VERIFIER ||
+                          ENABLE_LOREKEEPER ||
+                          ditherAssassinActive ||
+                          (outputFormat === 'png' && !ENABLE_PROGRESSIVE_PNG);
+
+      if (ENABLE_STREAM_REAPER && !needsBuffer && !clientDisconnected) {
+        res.setHeader('X-Stream-Reaper', 'ACTIVE');
+        recordMetric('streamReaper');
+
+        const passthrough = new PassThrough();
+
+        switch (outputFormat) {
+          case 'avif':
+            contentType = 'image/avif';
+            pipeline = pipeline.avif({
+              quality: Math.min(quality, 63),
+              effort: adaptiveEffort,
+              chromaSubsampling: getChromaSubsampling(analysis),
+            });
+            break;
+          case 'webp':
+            contentType = 'image/webp';
+            pipeline = pipeline.webp({
+              quality: quality,
+              effort: adaptiveEffort,
+              smartSubsample: true,
+              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+            });
+            break;
+          case 'jpeg':
+          default:
+            contentType = 'image/jpeg';
+            pipeline = pipeline.jpeg({
+              quality: quality,
+              progressive: true,
+              mozjpeg: true,
+              chromaSubsampling: getChromaSubsampling(analysis),
+              trellisQuantisation: true,
+              overshootDeringing: true,
+              optimiseScans: true,
+            });
+            break;
+        }
+
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('X-Perceptual-Cache', 'MISS');
+        if (judgeResult) {
+          res.setHeader('X-Quality-Grade', judgeResult.grade);
+          res.setHeader('X-Quality-Score', String(judgeResult.score));
+        }
+        if (ENABLE_CHRONOS_SCRIBE) {
+          res.setHeader('X-Chronos-State', chronos.state);
+          res.setHeader('X-Adaptive-Effort', String(adaptiveEffort));
+        }
+        res.setHeader('X-Image-Type', analysis.isMangaStrip ? 'manga-strip' :
+          analysis.isMangaPage ? 'manga-page' :
+          analysis.isAnime ? 'anime' :
+          analysis.isGrayscale ? 'grayscale' : 'photo');
+
+        pipeline.pipe(passthrough);
+        passthrough.pipe(res);
+
+        if (ENABLE_TIMEOUT_GUILLOTINE) {
+          signal.addEventListener('abort', () => {
+            pipeline.destroy();
+            passthrough.destroy();
+            if (!res.writableEnded) {
+              res.end();
+            }
+          });
+        }
+
+        await new Promise((resolve, reject) => {
+          passthrough.on('finish', resolve);
+          passthrough.on('error', reject);
+          pipeline.on('error', reject);
+        });
+
+        const encodeEnd = Date.now();
+        const encodeTime = encodeEnd - encodeStart;
+        if (ENABLE_CHRONOS_SCRIBE) {
+          recordEncodeTime(encodeTime);
+          res.setHeader('X-Processing-Time', `${encodeTime}ms`);
+        }
+
+        if (ENABLE_ORACLE_LEDGER) {
+          metrics.formatCounts[outputFormat] = (metrics.formatCounts[outputFormat] || 0) + 1;
+          metrics.totalEncodeTime += encodeTime;
+          metrics.encodeCount++;
+        }
+
+        return null;
+      }
+
+      // Buffer mode encoding
+      if (ditherAssassinActive) {
+        pipeline = pipeline.threshold(128);
+
+        outputBuffer = await pipeline.png({
+          palette: true,
+          colours: 2,
+          compressionLevel: 9,
+          dither: 0,
+          progressive: ENABLE_PROGRESSIVE_PNG,
+        }).toBuffer();
+        contentType = 'image/png';
+        res.setHeader('X-Dither-Assassin', 'ACTIVE');
+      } else {
+        const chromaSubsampling = getChromaSubsampling(analysis);
+
+        switch (outputFormat) {
+          case 'avif':
+            outputBuffer = await pipeline.avif({
+              quality: Math.min(quality, 63),
+              effort: adaptiveEffort,
+              chromaSubsampling: chromaSubsampling,
+            }).toBuffer();
+            contentType = 'image/avif';
+            break;
+
+          case 'webp':
+            outputBuffer = await pipeline.webp({
+              quality: quality,
+              effort: adaptiveEffort,
+              smartSubsample: true,
+              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+            }).toBuffer();
+            contentType = 'image/webp';
+            break;
+
+          case 'png': {
+            const useQuantumSorcerer = ENABLE_QUANTUM_SORCERER && (
+              analysis.entropy < 6.0 ||
+              (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.7) ||
+              analysis.isMangaPage ||
+              analysis.isMangaStrip
+            );
+
+            if (useQuantumSorcerer) {
+              outputBuffer = await pipeline.png({
+                compressionLevel: 8,
+                palette: true,
+                colours: 256,
+                dither: 1.0,
+                quality: quality,
+                progressive: ENABLE_PROGRESSIVE_PNG,
+              }).toBuffer();
+              res.setHeader('X-Quantum-Sorcerer', 'ACTIVE');
+              recordMetric('quantumSorcerer');
+            } else {
+              outputBuffer = await pipeline.png({
+                compressionLevel: 8,
+                palette: analysis.isGrayscale,
+                quality: quality,
+                progressive: ENABLE_PROGRESSIVE_PNG,
+              }).toBuffer();
+            }
+            contentType = 'image/png';
+            break;
+          }
+
+          case 'jpeg':
+          default:
+            outputBuffer = await pipeline.jpeg({
+              quality: quality,
+              progressive: true,
+              mozjpeg: true,
+              chromaSubsampling: chromaSubsampling,
+              trellisQuantisation: true,
+              overshootDeringing: true,
+              optimiseScans: true,
+            }).toBuffer();
+            contentType = 'image/jpeg';
+            break;
+        }
+      }
+
+      const encodeEnd = Date.now();
+      const encodeTime = encodeEnd - encodeStart;
+
+      if (ENABLE_CHRONOS_SCRIBE) {
+        recordEncodeTime(encodeTime);
+        res.setHeader('X-Processing-Time', `${encodeTime}ms`);
+        res.setHeader('X-Chronos-State', chronos.state);
+        res.setHeader('X-Adaptive-Effort', String(adaptiveEffort));
+        res.setHeader('X-Avg-Encode-Time', `${Math.round(getAverageEncodeTime())}ms`);
+      }
+
+      if (ENABLE_ORACLE_LEDGER) {
+        metrics.formatCounts[outputFormat] = (metrics.formatCounts[outputFormat] || 0) + 1;
+        metrics.totalEncodeTime += encodeTime;
+        metrics.encodeCount++;
+      }
+
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
+      }
+
+      if (ENABLE_ENCODING_VERIFIER) {
+        if (!verifyOutput(outputBuffer, outputFormat)) {
+          res.setHeader('X-Encoding-Verifier', 'FAILED');
+          res.status(404);
+          if (ENABLE_ORACLE_LEDGER) {
+            metrics.encodingFailures++;
+          }
+          return Buffer.alloc(0);
+        }
+        res.setHeader('X-Encoding-Verifier', 'PASSED');
+      }
+
+      if (outputBuffer.length >= buffer.length) {
+        res.setHeader('X-Compression', 'SKIPPED');
+        res.setHeader('Content-Type', `image/${format}`);
+        if (placeholder) res.setHeader('X-Placeholder', placeholder);
+        if (judgeResult) res.setHeader('X-Quality-Grade', judgeResult.grade);
+        if (palette.length > 0) res.setHeader('X-Palette', palette.join(','));
+        if (ENABLE_ORACLE_LEDGER) {
+          metrics.totalBytesOut += buffer.length;
+        }
+        return buffer;
+      }
+
+      if (ENABLE_ORACLE_LEDGER) {
+        metrics.totalBytesOut += outputBuffer.length;
+        metrics.totalBytesSaved += buffer.length - outputBuffer.length;
+      }
+
+      if (ENABLE_CHRONOS_SCRIBE) {
+        const bytesSaved = buffer.length - outputBuffer.length;
+        res.setHeader('X-Bytes-Saved', `${(bytesSaved / 1024).toFixed(1)}KB`);
+      }
+
+      if (ENABLE_LOREKEEPER && outputFormat === 'png' && !loreHit && !ditherAssassinActive) {
+        const newLoreHash = generateLoreHash(buffer);
+        outputBuffer = await embedLoreSignature(outputBuffer, newLoreHash);
+        setLoreCache(newLoreHash, {
+          buffer: outputBuffer,
+          contentType: contentType,
+          placeholder: placeholder,
+          grade: judgeResult ? judgeResult.grade : null,
+          palette: palette,
+        });
+        res.setHeader('X-Lorekeeper', 'EMBEDDED');
+        recordMetric('lorekeeper');
+      }
+
+      setPerceptualCache(pHash, {
         buffer: outputBuffer,
         contentType: contentType,
         placeholder: placeholder,
         grade: judgeResult ? judgeResult.grade : null,
         palette: palette,
       });
-      res.setHeader('X-Lorekeeper', 'EMBEDDED');
+
+      res.setHeader('X-Perceptual-Cache', 'MISS');
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('X-Compression-Ratio',
+        ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%');
+
+      if (placeholder) {
+        res.setHeader('X-Placeholder', placeholder);
+      }
+
+      if (judgeResult) {
+        res.setHeader('X-Quality-Grade', judgeResult.grade);
+        res.setHeader('X-Quality-Score', String(judgeResult.score));
+      }
+
+      res.setHeader('X-Image-Type', analysis.isMangaStrip ? 'manga-strip' :
+        analysis.isMangaPage ? 'manga-page' :
+        analysis.isAnime ? 'anime' :
+        analysis.isGrayscale ? 'grayscale' : 'photo');
+
+      return outputBuffer;
+
+    } finally {
+      if (ENABLE_SEMAPHORE_WARDEN && semaphoreAcquired) {
+        releaseSemaphore();
+      }
     }
-
-    setPerceptualCache(pHash, {
-      buffer: outputBuffer,
-      contentType: contentType,
-      placeholder: placeholder,
-      grade: judgeResult ? judgeResult.grade : null,
-      palette: palette,
-    });
-
-    res.setHeader('X-Perceptual-Cache', 'MISS');
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('X-Compression-Ratio',
-      ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%');
-
-    if (placeholder) {
-      res.setHeader('X-Placeholder', placeholder);
-    }
-
-    if (judgeResult) {
-      res.setHeader('X-Quality-Grade', judgeResult.grade);
-      res.setHeader('X-Quality-Score', String(judgeResult.score));
-    }
-
-    res.setHeader('X-Image-Type', analysis.isMangaStrip ? 'manga-strip' :
-      analysis.isMangaPage ? 'manga-page' :
-      analysis.isAnime ? 'anime' :
-      analysis.isGrayscale ? 'grayscale' : 'photo');
-
-    return outputBuffer;
 
   } catch (err) {
+    if (clientDisconnected || signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      return Buffer.alloc(0);
+    }
     console.error('[COMPRESS ERROR]', err.message);
     res.setHeader('X-Compression', 'FAILED');
+    if (ENABLE_ORACLE_LEDGER) {
+      metrics.encodingFailures++;
+      metrics.totalBytesOut += buffer.length;
+    }
     return buffer;
+  } finally {
+    activeRequests--;
   }
-  }
+    }
