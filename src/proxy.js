@@ -103,26 +103,10 @@ function executeFetch(url, cfg, abortSignal) {
   return request;
 }
 
-// 🛑 PRE-FLIGHT GUILLOTINE (Zero-Byte Size Check)
-async function safeExecuteFetch(url, cfg, abortSignal) {
-  try {
-    const headRes = await got.head(url, {
-      ...cfg,
-      responseType: 'text',
-      signal: abortSignal
-    });
-    const contentLength = parseInt(headRes.headers['content-length'] || '0', 10);
-    
-    if (contentLength > MAX_DOWNLOAD_BYTES) {
-      const err = new Error('BODY_TOO_LARGE');
-      err.code = 'BODY_TOO_LARGE';
-      throw err;
-    }
-  } catch (err) {
-    if (err.code === 'BODY_TOO_LARGE') throw err;
-    // If HEAD fails, proceed to normal download
-  }
-
+// 🛑 SURGICAL FIX: Removed pre-flight HEAD request.
+// The downloadProgress hook in executeFetch already catches RAM bombs mid-stream.
+// This eliminates 50-300ms of latency per cold fetch.
+function safeExecuteFetch(url, cfg, abortSignal) {
   return executeFetch(url, cfg, abortSignal);
 }
 
@@ -327,12 +311,12 @@ export default async function proxy(req, res) {
     if (!detectedType.startsWith('image/')) {
       return sendGhost(res, 3600);
     }
-    
 
     // 🛑 THE SOCRATIC MIRROR (Deep Interrogation Mode)
     if (req.query?.debug === '1') {
       try {
-        const sharpInstance = sharp(rawBody, { animated: true });
+        // 🛑 SURGICAL FIX: Removed { animated: true } to avoid parsing all animation frames into memory.
+        const sharpInstance = sharp(rawBody);
         const metadata = await sharpInstance.metadata();
         
         const report = {
@@ -410,4 +394,4 @@ export default async function proxy(req, res) {
 
     return sendGhost(res, 60);
   }
-    }
+      }
