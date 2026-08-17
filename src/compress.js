@@ -479,22 +479,27 @@ function setLoreCache(hash, result) {
   lorekeeperCache.set(hash, result);
 }
 
-async function createNoiseTile() {
-  const size = 128;
-  const channels = 4;
-  const data = Buffer.alloc(size * size * channels);
-
-  for (let i = 0; i < size * size; i++) {
-    const noise = Math.floor(Math.random() * 256);
-    data[i * channels] = noise;
-    data[i * channels + 1] = noise;
-    data[i * channels + 2] = noise;
-    data[i * channels + 3] = 6;
+// 🛑 SURGICAL FIX: Cache the noise tile in the V8 isolate to prevent per-request CPU/GC churn.
+let _noiseTilePromise = null;
+function getNoiseTile() {
+  if (!_noiseTilePromise) {
+    _noiseTilePromise = (async () => {
+      const size = 128;
+      const channels = 4;
+      const data = Buffer.alloc(size * size * channels);
+      for (let i = 0; i < size * size; i++) {
+        const noise = Math.floor(Math.random() * 256);
+        data[i * channels] = noise;
+        data[i * channels + 1] = noise;
+        data[i * channels + 2] = noise;
+        data[i * channels + 3] = 6;
+      }
+      return sharp(data, {
+        raw: { width: size, height: size, channels: channels },
+      }).png().toBuffer();
+    })();
   }
-
-  return sharp(data, {
-    raw: { width: size, height: size, channels: channels },
-  }).png().toBuffer();
+  return _noiseTilePromise;
 }
 
 async function detectAlphaStrippable(buffer, metadata) {
@@ -1257,7 +1262,7 @@ export default async function compress(req, res, buffer) {
       }
 
       if (bandingExorcistActive) {
-        const noiseTile = await createNoiseTile();
+        const noiseTile = await getNoiseTile();
         pipeline = pipeline.composite([{
           input: noiseTile,
           tile: true,
@@ -1575,4 +1580,4 @@ export default async function compress(req, res, buffer) {
   } finally {
     activeRequests--;
   }
-    }
+}
