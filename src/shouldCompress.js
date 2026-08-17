@@ -18,13 +18,7 @@ export default function shouldCompress(req, buffer) {
 
   try {
     // 🛑 1GB RAM / 60s CONSTRAINT: O(1) Short-Circuit.
-    // Bypass compression entirely for massive files to protect serverless memory.
-    if (buffer.length > 14 * 1024 * 1024) {
-      return false;
-    }
-  } catch {
+  // Bypass compression entirely for massive files to protect serverless memory.
+  if (buffer.length > 14 * 1024 * 1024) {
     return false;
   }
-
-  return true;
-}
