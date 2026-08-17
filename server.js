@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import helmet from 'helmet';
+import zlib from 'node:zlib';
 import authenticate from './src/authenticate.js';
 import params from './src/params.js';
 import proxy from './src/proxy.js';
@@ -24,6 +25,33 @@ if (process.env.LOG === '1') {
     skip: (req) => !!(req.query.api || req.query.apikey || req.query.api_key || req.headers['x-api-key'])
   }));
 }
+
+// 🛑 THE RESPONSE COMPRESSOR (Brotli JSON)
+// Compresses all JSON responses with Brotli if the client accepts it.
+// Falls back to uncompressed JSON if compression fails.
+app.use((req, res, next) => {
+  const acceptEncoding = req.headers['accept-encoding'] || '';
+  if (!acceptEncoding.includes('br')) return next();
+
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    const raw = JSON.stringify(body);
+    try {
+      const compressed = zlib.brotliCompressSync(Buffer.from(raw), {
+        params: {
+          [zlib.constants.BROTLI_PARAM_QUALITY]: 4,
+        },
+      });
+      res.setHeader('Content-Encoding', 'br');
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Length', String(compressed.length));
+      return res.end(compressed);
+    } catch {
+      return originalJson(body);
+    }
+  };
+  next();
+});
 
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
@@ -51,14 +79,12 @@ app.use((req, res, next) => {
 app.get('/healthz', (req, res) => res.status(200).json({ status: 'OK' }));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-// 🛑 SURGICAL FIX: Wire the Oracle's Ledger to a real route.
-// The Edge Middleware does NOT intercept /metrics, so this reaches Node.js.
+// 🛑 THE ORACLE'S LEDGER (Wired to a real route)
 app.get('/metrics', authenticate, (req, res) => {
   res.json(getMetrics());
 });
 
-// 🛑 SURGICAL FIX: Wire the Heartbeat Sentinel to a route the Edge Middleware does NOT intercept.
-// Edge Middleware intercepts /health and /healthz, so we use /deep-health instead.
+// 🛑 THE HEARTBEAT SENTINEL (Wired to a route the Edge Middleware does NOT intercept)
 app.get('/deep-health', async (req, res) => {
   try {
     const health = await checkHealth();
@@ -67,7 +93,7 @@ app.get('/deep-health', async (req, res) => {
     } else {
       res.status(503).json(health);
     }
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: 'Health check failed' });
   }
 });
