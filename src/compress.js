@@ -18,6 +18,19 @@ const HEALTH_LAG_THRESHOLD = parseInt(process.env.HEALTH_LAG_THRESHOLD) || 100;
 const SHUTDOWN_TIMEOUT = parseInt(process.env.SHUTDOWN_TIMEOUT) || 10000;
 
 // ============================================================
+// 🛑 SURGICAL FIX: Promise Timeout Wrapper
+// Races any promise against a hard timeout to prevent infinite hangs.
+// ============================================================
+
+function withTimeout(promise, ms, label = 'OPERATION') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}_TIMEOUT`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// ============================================================
 // FEATURE 1: THE ORACLE'S LEDGER (Global Telemetry)
 // ============================================================
 
@@ -238,7 +251,7 @@ const ENABLE_ALPHA_SENTINEL = envBool('ENABLE_ALPHA_SENTINEL', true);
 const ENABLE_LAYOUT_PROPHET = envBool('ENABLE_LAYOUT_PROPHET', true);
 const ENABLE_ENCODING_VERIFIER = envBool('ENABLE_ENCODING_VERIFIER', true);
 const ENABLE_GHOST_STRIPPER = envBool('ENABLE_GHOST_STRIPPER', true);
-const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', true);
+const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', false); // 🛑 Disabled by default to prevent timeouts
 const ENABLE_METADATA_REAPER = envBool('ENABLE_METADATA_REAPER', true);
 const ENABLE_WEBP_PRESET = envBool('ENABLE_WEBP_PRESET', true);
 const ENABLE_PROGRESSIVE_PNG = envBool('ENABLE_PROGRESSIVE_PNG', true);
@@ -258,11 +271,15 @@ const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
 
 async function generatePerceptualHash(buffer) {
   try {
-    const { data } = await sharp(buffer)
-      .resize(8, 8, { fit: 'fill' })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data } = await withTimeout(
+      sharp(buffer)
+        .resize(8, 8, { fit: 'fill' })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      5000,
+      'PERCEPTUAL_HASH'
+    );
 
     let hash = '';
     const avg = data.reduce((sum, v) => sum + v, 0) / data.length;
@@ -291,10 +308,14 @@ function setPerceptualCache(hash, result) {
 
 async function generatePlaceholderAndPalette(buffer) {
   try {
-    const { data, info } = await sharp(buffer)
-      .resize(32, 32, { fit: 'inside' })
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data, info } = await withTimeout(
+      sharp(buffer)
+        .resize(32, 32, { fit: 'inside' })
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      5000,
+      'PLACEHOLDER_PALETTE'
+    );
 
     const channels = info.channels;
 
@@ -331,12 +352,16 @@ async function generatePlaceholderAndPalette(buffer) {
 
     let placeholder = null;
     if (ENABLE_PLACEHOLDER && !isVoid) {
-      const thumbBuffer = await sharp(buffer)
-        .resize(32, 32, { fit: 'inside' })
-        .blur(2)
-        .grayscale()
-        .jpeg({ quality: 20 })
-        .toBuffer();
+      const thumbBuffer = await withTimeout(
+        sharp(buffer)
+          .resize(32, 32, { fit: 'inside' })
+          .blur(2)
+          .grayscale()
+          .jpeg({ quality: 20 })
+          .toBuffer(),
+        5000,
+        'PLACEHOLDER_THUMB'
+      );
       placeholder = 'data:image/jpeg;base64,' + thumbBuffer.toString('base64');
     }
 
@@ -348,11 +373,15 @@ async function generatePlaceholderAndPalette(buffer) {
 
 async function detectSkew(buffer) {
   try {
-    const { data, info } = await sharp(buffer)
-      .resize(256, 256, { fit: 'inside' })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data, info } = await withTimeout(
+      sharp(buffer)
+        .resize(256, 256, { fit: 'inside' })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      8000,
+      'SKEW'
+    );
 
     const w = info.width;
     const h = info.height;
@@ -401,7 +430,6 @@ async function detectSkew(buffer) {
   }
 }
 
-// 🛑 SURGICAL FIX: Cache the noise tile in the V8 isolate to prevent per-request CPU/GC churn.
 let _noiseTilePromise = null;
 function getNoiseTile() {
   if (!_noiseTilePromise) {
@@ -429,10 +457,14 @@ async function detectAlphaStrippable(buffer, metadata) {
 
   try {
     const sampleSize = 64;
-    const { data, info } = await sharp(buffer)
-      .resize(sampleSize, sampleSize, { fit: 'inside' })
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data, info } = await withTimeout(
+      sharp(buffer)
+        .resize(sampleSize, sampleSize, { fit: 'inside' })
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      5000,
+      'ALPHA'
+    );
 
     const channels = info.channels;
     const alphaIdx = channels - 1;
@@ -471,17 +503,29 @@ function verifyOutput(buffer, format) {
 
 async function formatDuel(buffer, targetQuality) {
   try {
-    const sample = await sharp(buffer)
-      .resize(256, 256, { fit: 'inside', withoutEnlargement: true })
-      .toBuffer();
+    const sample = await withTimeout(
+      sharp(buffer)
+        .resize(256, 256, { fit: 'inside', withoutEnlargement: true })
+        .toBuffer(),
+      8000,
+      'FORMAT_DUEL_SAMPLE'
+    );
 
-    const avifSample = await sharp(sample)
-      .avif({ quality: Math.min(targetQuality, 63), effort: 2 })
-      .toBuffer();
+    const avifSample = await withTimeout(
+      sharp(sample)
+        .avif({ quality: Math.min(targetQuality, 63), effort: 1 })
+        .toBuffer(),
+      8000,
+      'FORMAT_DUEL_AVIF'
+    );
 
-    const webpSample = await sharp(sample)
-      .webp({ quality: targetQuality, effort: 2 })
-      .toBuffer();
+    const webpSample = await withTimeout(
+      sharp(sample)
+        .webp({ quality: targetQuality, effort: 1 })
+        .toBuffer(),
+      8000,
+      'FORMAT_DUEL_WEBP'
+    );
 
     if (avifSample.length <= webpSample.length) {
       return { winner: 'avif', avifSize: avifSample.length, webpSize: webpSample.length };
@@ -556,11 +600,15 @@ async function detectHalftone(buffer, metadata, analysis) {
     const left = Math.floor((width - sampleSize) / 2);
     const top = Math.floor((height - sampleSize) / 2);
 
-    const { data } = await sharp(buffer)
-      .extract({ left, top, width: sampleSize, height: sampleSize })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data } = await withTimeout(
+      sharp(buffer)
+        .extract({ left, top, width: sampleSize, height: sampleSize })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      8000,
+      'HALFTONE'
+    );
 
     let microSum = 0;
     let microCount = 0;
@@ -627,11 +675,15 @@ async function detectLineArt(buffer, analysis) {
   }
 
   try {
-    const { data } = await sharp(buffer)
-      .resize(256, 256, { fit: 'inside' })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const { data } = await withTimeout(
+      sharp(buffer)
+        .resize(256, 256, { fit: 'inside' })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      8000,
+      'LINEART'
+    );
 
     const hist = new Array(256).fill(0);
     for (let i = 0; i < data.length; i++) {
@@ -665,7 +717,11 @@ async function detectLineArt(buffer, analysis) {
 }
 
 async function detectImageType(buffer, metadata) {
-  const stats = await sharp(buffer).stats();
+  const stats = await withTimeout(
+    sharp(buffer).stats(),
+    8000,
+    'IMAGE_TYPE'
+  );
   const { channels, width, height } = stats;
 
   let totalEntropy = 0;
@@ -740,9 +796,6 @@ function getViewportMaxDim(req) {
 }
 
 function getChromaSubsampling(analysis) {
-  // 🛑 SURGICAL FIX: Sharp only accepts '4:4:4' or '4:2:0' for JPEG, WebP, and AVIF.
-  // '4:0:0' and '4:2:2' will throw fatal exceptions and crash the pipeline.
-  // Grayscale images do not contain chroma data, so '4:2:0' is perfectly safe.
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
   return '4:2:0';
 }
@@ -752,7 +805,6 @@ function getChromaSubsampling(analysis) {
 // ============================================================
 
 export default async function compress(req, res, buffer) {
-  // --- FEATURE 3: THE GUILLOTINE'S GRACE ---
   if (isShuttingDown) {
     res.status(503);
     res.setHeader('X-Guillotine-Grace', 'SHUTTING_DOWN');
@@ -762,7 +814,6 @@ export default async function compress(req, res, buffer) {
 
   activeRequests++;
 
-  // --- FEATURE 1: THE ORACLE'S LEDGER ---
   if (ENABLE_ORACLE_LEDGER) {
     metrics.totalRequests++;
     metrics.totalBytesIn += buffer.length;
@@ -771,18 +822,18 @@ export default async function compress(req, res, buffer) {
   const abortController = new AbortController();
   const { signal } = abortController;
 
-  // 🛑 SURGICAL FIX: Hard Timeout Guard reduced to 40s.
-  // Provides 20s buffer to gracefully exit before Vercel's 60s guillotine.
-  const HARD_TIMEOUT_MS = 40000;
+  // 🛑 SURGICAL FIX: Hard Timeout Guard at 20s.
+  // Every sharp operation is individually bounded by withTimeout.
+  const HARD_TIMEOUT_MS = 20000;
   const hardTimeout = setTimeout(() => {
     abortController.abort();
   }, HARD_TIMEOUT_MS);
 
   let clientDisconnected = false;
 
-  // 🛑 SURGICAL FIX: FAST MODE for large images.
-  // Images > 5MB bypass heavy analysis to prevent CPU starvation and 60s timeouts.
-  const IS_LARGE_IMAGE = buffer.length > 5 * 1024 * 1024;
+  // 🛑 SURGICAL FIX: FAST MODE threshold reduced to 1MB.
+  // Images > 1MB skip heavy analysis to guarantee survival.
+  const IS_LARGE_IMAGE = buffer.length > 1 * 1024 * 1024;
 
   if (ENABLE_TIMEOUT_GUILLOTINE) {
     req.on('close', () => {
@@ -803,7 +854,12 @@ export default async function compress(req, res, buffer) {
       return Buffer.alloc(0);
     }
 
-    const metadata = await sharp(buffer).metadata();
+    // 🛑 SURGICAL FIX: Timeout on metadata call.
+    const metadata = await withTimeout(
+      sharp(buffer).metadata(),
+      10000,
+      'METADATA'
+    );
     const format = metadata.format;
 
     if (!format || format === 'raw') {
@@ -841,7 +897,6 @@ export default async function compress(req, res, buffer) {
     }
 
     let thumbResult = null;
-    // 🛑 SURGICAL FIX: Skip placeholder generation for large images to save CPU.
     if (!IS_LARGE_IMAGE && (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER)) {
       thumbResult = await generatePlaceholderAndPalette(buffer);
 
@@ -910,7 +965,6 @@ export default async function compress(req, res, buffer) {
     }
 
     try {
-      // 🛑 SURGICAL FIX: FAST MODE analysis bypass for large images.
       let analysis;
       if (IS_LARGE_IMAGE) {
         res.setHeader('X-Fast-Mode', 'ACTIVE');
@@ -948,7 +1002,6 @@ export default async function compress(req, res, buffer) {
       }
 
       let skewAngle = 0;
-      // 🛑 SURGICAL FIX: Skip deskew for large images.
       if (!IS_LARGE_IMAGE && ENABLE_DESKEW && !analysis.isMangaStrip) {
         skewAngle = await detectSkew(buffer);
         if (skewAngle !== 0) {
@@ -969,7 +1022,6 @@ export default async function compress(req, res, buffer) {
       }
 
       let halftoneResult = null;
-      // 🛑 SURGICAL FIX: Skip halftone detection for large images.
       if (!IS_LARGE_IMAGE && ENABLE_MOIRE) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
@@ -981,7 +1033,6 @@ export default async function compress(req, res, buffer) {
       }
 
       let lineArtResult = null;
-      // 🛑 SURGICAL FIX: Skip line art detection for large images.
       if (!IS_LARGE_IMAGE && (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN)) {
         lineArtResult = await detectLineArt(buffer, analysis);
       }
@@ -994,7 +1045,6 @@ export default async function compress(req, res, buffer) {
 
       let alphaStrippable = false;
       const isAnimated = metadata.pages > 1;
-      // 🛑 SURGICAL FIX: Skip alpha detection for large images.
       if (!IS_LARGE_IMAGE && ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
         alphaStrippable = await detectAlphaStrippable(buffer, metadata);
         if (alphaStrippable) {
@@ -1010,7 +1060,6 @@ export default async function compress(req, res, buffer) {
       }
 
       const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
-      // 🛑 SURGICAL FIX: Force effort 1 for large images to minimize encode CPU time.
       const adaptiveEffort = IS_LARGE_IMAGE ? 1 : chronos.effort;
 
       const requestedFormat = req.query.f || req.query.format;
@@ -1027,8 +1076,8 @@ export default async function compress(req, res, buffer) {
         const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
         const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
 
-        // 🛑 SURGICAL FIX: Skip format duel for large images to save CPU.
-        if (!IS_LARGE_IMAGE && ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
+        // 🛑 SURGICAL FIX: formatDuel disabled by default. Use Accept header directly.
+        if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
           const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
           let quality = calculateQuality(analysis, baseQuality);
           if (judgeResult) {
@@ -1095,8 +1144,6 @@ export default async function compress(req, res, buffer) {
 
       let pipeline = sharp(buffer, {
         animated: isAnimated,
-        // 🛑 SURGICAL FIX: Reduced from 268402689 to 60000000.
-        // 268M pixels = 1GB+ RAM per decode. 60M = ~240MB, safe for serverless.
         limitInputPixels: 60000000,
       });
 
@@ -1317,13 +1364,23 @@ export default async function compress(req, res, buffer) {
           });
         }
 
-        await new Promise((resolve, reject) => {
-          passthrough.on('finish', resolve);
-          passthrough.on('error', reject);
-          // 🛑 SURGICAL FIX: Resolve on 'close' to prevent hanging when client disconnects.
-          passthrough.on('close', resolve);
-          pipeline.on('error', reject);
-        });
+        // 🛑 SURGICAL FIX: Race the stream against a 30s timeout.
+        try {
+          await withTimeout(
+            new Promise((resolve, reject) => {
+              passthrough.on('finish', resolve);
+              passthrough.on('error', reject);
+              passthrough.on('close', resolve);
+              pipeline.on('error', reject);
+            }),
+            30000,
+            'STREAM_ENCODE'
+          );
+        } catch {
+          // Stream timed out. Response may be partially sent. Just end it.
+          if (!res.writableEnded) res.end();
+          return null;
+        }
 
         const encodeEnd = Date.now();
         const encodeTime = encodeEnd - encodeStart;
@@ -1342,16 +1399,23 @@ export default async function compress(req, res, buffer) {
       }
 
       // Buffer mode encoding
+      // 🛑 SURGICAL FIX: Race the final encode against a 30s timeout.
+      const ENCODE_TIMEOUT_MS = 30000;
+
       if (ditherAssassinActive) {
         pipeline = pipeline.threshold(128);
 
-        outputBuffer = await pipeline.png({
-          palette: true,
-          colours: 2,
-          compressionLevel: 9,
-          dither: 0,
-          progressive: ENABLE_PROGRESSIVE_PNG,
-        }).toBuffer();
+        outputBuffer = await withTimeout(
+          pipeline.png({
+            palette: true,
+            colours: 2,
+            compressionLevel: 9,
+            dither: 0,
+            progressive: ENABLE_PROGRESSIVE_PNG,
+          }).toBuffer(),
+          ENCODE_TIMEOUT_MS,
+          'ENCODE_DITHER'
+        );
         contentType = 'image/png';
         res.setHeader('X-Dither-Assassin', 'ACTIVE');
       } else {
@@ -1359,21 +1423,29 @@ export default async function compress(req, res, buffer) {
 
         switch (outputFormat) {
           case 'avif':
-            outputBuffer = await pipeline.avif({
-              quality: Math.min(quality, 63),
-              effort: adaptiveEffort,
-              chromaSubsampling: chromaSubsampling,
-            }).toBuffer();
+            outputBuffer = await withTimeout(
+              pipeline.avif({
+                quality: Math.min(quality, 63),
+                effort: adaptiveEffort,
+                chromaSubsampling: chromaSubsampling,
+              }).toBuffer(),
+              ENCODE_TIMEOUT_MS,
+              'ENCODE_AVIF'
+            );
             contentType = 'image/avif';
             break;
 
           case 'webp':
-            outputBuffer = await pipeline.webp({
-              quality: quality,
-              effort: adaptiveEffort,
-              smartSubsample: true,
-              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
-            }).toBuffer();
+            outputBuffer = await withTimeout(
+              pipeline.webp({
+                quality: quality,
+                effort: adaptiveEffort,
+                smartSubsample: true,
+                preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+              }).toBuffer(),
+              ENCODE_TIMEOUT_MS,
+              'ENCODE_WEBP'
+            );
             contentType = 'image/webp';
             break;
 
@@ -1386,23 +1458,31 @@ export default async function compress(req, res, buffer) {
             );
 
             if (useQuantumSorcerer) {
-              outputBuffer = await pipeline.png({
-                compressionLevel: 8,
-                palette: true,
-                colours: 256,
-                dither: 1.0,
-                quality: quality,
-                progressive: ENABLE_PROGRESSIVE_PNG,
-              }).toBuffer();
+              outputBuffer = await withTimeout(
+                pipeline.png({
+                  compressionLevel: 8,
+                  palette: true,
+                  colours: 256,
+                  dither: 1.0,
+                  quality: quality,
+                  progressive: ENABLE_PROGRESSIVE_PNG,
+                }).toBuffer(),
+                ENCODE_TIMEOUT_MS,
+                'ENCODE_PNG_QUANTUM'
+              );
               res.setHeader('X-Quantum-Sorcerer', 'ACTIVE');
               recordMetric('quantumSorcerer');
             } else {
-              outputBuffer = await pipeline.png({
-                compressionLevel: 8,
-                palette: analysis.isGrayscale,
-                quality: quality,
-                progressive: ENABLE_PROGRESSIVE_PNG,
-              }).toBuffer();
+              outputBuffer = await withTimeout(
+                pipeline.png({
+                  compressionLevel: 8,
+                  palette: analysis.isGrayscale,
+                  quality: quality,
+                  progressive: ENABLE_PROGRESSIVE_PNG,
+                }).toBuffer(),
+                ENCODE_TIMEOUT_MS,
+                'ENCODE_PNG'
+              );
             }
             contentType = 'image/png';
             break;
@@ -1410,15 +1490,19 @@ export default async function compress(req, res, buffer) {
 
           case 'jpeg':
           default:
-            outputBuffer = await pipeline.jpeg({
-              quality: quality,
-              progressive: true,
-              mozjpeg: true,
-              chromaSubsampling: chromaSubsampling,
-              trellisQuantisation: true,
-              overshootDeringing: true,
-              optimiseScans: true,
-            }).toBuffer();
+            outputBuffer = await withTimeout(
+              pipeline.jpeg({
+                quality: quality,
+                progressive: true,
+                mozjpeg: true,
+                chromaSubsampling: chromaSubsampling,
+                trellisQuantisation: true,
+                overshootDeringing: true,
+                optimiseScans: true,
+              }).toBuffer(),
+              ENCODE_TIMEOUT_MS,
+              'ENCODE_JPEG'
+            );
             contentType = 'image/jpeg';
             break;
         }
@@ -1517,11 +1601,20 @@ export default async function compress(req, res, buffer) {
     }
 
   } catch (err) {
-    if (clientDisconnected || signal.aborted) {
-      if (!res.headersSent) res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-      if (!res.writableEnded) res.end();
+    // 🛑 SURGICAL FIX: Handle OPERATION_TIMEOUT errors by returning raw image.
+    const isTimeout = err.message && err.message.includes('_TIMEOUT');
+    
+    if (clientDisconnected || signal.aborted || isTimeout) {
+      if (!res.headersSent) {
+        res.setHeader('X-Timeout-Guillotine', isTimeout ? 'OPERATION_TIMEOUT' : 'ABORTED');
+        res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
+      }
+      if (!res.writableEnded) {
+        res.end(buffer);
+      }
       return null;
     }
+    
     console.error('[COMPRESS ERROR]', err.message);
     
     if (ENABLE_ORACLE_LEDGER) {
@@ -1529,14 +1622,11 @@ export default async function compress(req, res, buffer) {
       metrics.totalBytesOut += buffer.length;
     }
 
-    // 🛑 SURGICAL FIX: Prevent Vercel 60s Timeout & ERR_STREAM_WRITE_AFTER_END.
-    // If headers aren't sent, send the fallback buffer and CLOSE the response.
     if (!res.headersSent && !res.writableEnded) {
       res.setHeader('X-Compression', 'FAILED');
       res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
       res.end(buffer); 
     } else if (!res.writableEnded) {
-      // If headers were sent (streaming started) but it failed, just kill the stream.
       res.end(); 
     }
     return null;
@@ -1544,4 +1634,4 @@ export default async function compress(req, res, buffer) {
     clearTimeout(hardTimeout);
     activeRequests--;
   }
-    }
+}
