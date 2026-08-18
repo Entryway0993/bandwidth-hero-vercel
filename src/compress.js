@@ -1447,6 +1447,22 @@ export default async function compress(req, res, buffer) {
         }
       }
 
+      // 🛑 DIAGNOSTIC: Log exact encoding parameters
+      console.log('[ENCODE-DIAG]', JSON.stringify({
+        outputFormat,
+        quality,
+        adaptiveEffort,
+        origW,
+        origH,
+        targetWidth,
+        targetHeight,
+        bufferLength: outputBuffer?.length || 0,
+        inputLength: buffer.length,
+        isGrayscale: analysis.isGrayscale,
+        isMangaStrip: analysis.isMangaStrip,
+        isMangaPage: analysis.isMangaPage,
+      }));
+
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
@@ -1527,6 +1543,9 @@ export default async function compress(req, res, buffer) {
       });
 
       res.setHeader('X-Perceptual-Cache', 'MISS');
+      res.setHeader('X-Encode-Quality', String(quality));
+      res.setHeader('X-Encode-Effort', String(adaptiveEffort));
+      res.setHeader('X-Encode-Dims', `${targetWidth || origW}x${targetHeight || origH}`);
       res.setHeader('Content-Type', contentType);
       res.setHeader('X-Compression-Ratio',
         ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%');
