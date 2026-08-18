@@ -203,7 +203,7 @@ function getChronosState(pixelCount) {
   if (rollingEncodeTimes.length === 0) {
     const millions = pixelCount / 1_000_000;
     let effort = 9;
-    if (millions > 8) effort = 4;        // 8MP+ : effort 4 (~55s) — 30% timeout risk
+    if (millions > 8) effort = 3;        // 8MP+ : effort 4 (~55s) — 30% timeout risk
     else if (millions > 4) effort = 5;   // 4-8MP: effort 5 (~25s) — safe
     else if (millions > 2) effort = 7;   // 2-4MP: effort 7 (~10s) — safe
     return { state: 'COLD-START', effort };
