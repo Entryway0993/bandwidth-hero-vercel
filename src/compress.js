@@ -198,11 +198,24 @@ function getAverageEncodeTime() {
 
 function getChronosState() {
   const avg = getAverageEncodeTime();
+
+  // 🛑 SURGICAL FIX: Calibrated for 60s Vercel timeout.
+  // ~53s encoding budget after download + analysis + overhead.
+  const ENCODE_BUDGET_MS = 53000;
+
   let state, effort;
-  if (avg > 1000) { state = 'CRITICAL'; effort = 1; }
-  else if (avg > 600) { state = 'HOT'; effort = 2; }
-  else if (avg > 300) { state = 'WARM'; effort = 3; }
-  else { state = 'COLD'; effort = 4; }
+  if (avg > ENCODE_BUDGET_MS * 0.85) { state = 'CRITICAL'; effort = 1; }  // >45s
+  else if (avg > ENCODE_BUDGET_MS * 0.65) { state = 'HOT'; effort = 2; }  // >34.5s
+  else if (avg > ENCODE_BUDGET_MS * 0.40) { state = 'WARM'; effort = 3; } // >21.2s
+  else { state = 'COLD'; effort = 4; }                                     // <21.2s
+
+  metrics.chronosStateHistory.push({ state, effort, avg: Math.round(avg), time: Date.now() });
+  if (metrics.chronosStateHistory.length > 100) {
+    metrics.chronosStateHistory.shift();
+  }
+
+  return { state, effort };
+}
 
   metrics.chronosStateHistory.push({ state, effort, avg: Math.round(avg), time: Date.now() });
   if (metrics.chronosStateHistory.length > 100) {
