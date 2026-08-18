@@ -1052,8 +1052,10 @@ export default async function compress(req, res, buffer) {
         return Buffer.alloc(0);
       }
 
-      const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
-      const adaptiveEffort = chronos.effort;
+      const FORCE_EFFORT = parseInt(process.env.FORCE_EFFORT) || 0;
+const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
+// 🛑 SURGICAL FIX: FORCE_EFFORT overrides Chronos. Set FORCE_EFFORT=4 in env to lock effort.
+const adaptiveEffort = FORCE_EFFORT > 0 ? FORCE_EFFORT : chronos.effort;
 
       // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
       // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
@@ -1318,6 +1320,9 @@ export default async function compress(req, res, buffer) {
 
         res.setHeader('Content-Type', contentType);
         res.setHeader('X-Perceptual-Cache', 'MISS');
+        res.setHeader('X-Encode-Quality', String(quality));
+        res.setHeader('X-Encode-Effort', String(adaptiveEffort));
+        res.setHeader('X-Encode-Dims', `${targetWidth || origW}x${targetHeight || origH}`);
         if (judgeResult) {
           res.setHeader('X-Quality-Grade', judgeResult.grade);
           res.setHeader('X-Quality-Score', String(judgeResult.score));
