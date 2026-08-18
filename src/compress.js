@@ -199,15 +199,27 @@ function getAverageEncodeTime() {
 function getChronosState() {
   const avg = getAverageEncodeTime();
 
-  // 🛑 SURGICAL FIX: Calibrated for 60s Vercel timeout.
-  // ~53s encoding budget after download + analysis + overhead.
-  const ENCODE_BUDGET_MS = 53000;
+  // 🛑 SURGICAL FIX: 100% of 60s budget. No overhead reservation.
+  // 8 gradual effort levels (2→9). User explicitly accepts timeout risk.
+  const ENCODE_BUDGET_MS = 60000;
+  const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
 
-  let state, effort;
-  if (avg > ENCODE_BUDGET_MS * 0.85) { state = 'CRITICAL'; effort = 1; }  // >45s
-  else if (avg > ENCODE_BUDGET_MS * 0.65) { state = 'HOT'; effort = 2; }  // >34.5s
-  else if (avg > ENCODE_BUDGET_MS * 0.40) { state = 'WARM'; effort = 3; } // >21.2s
-  else { state = 'COLD'; effort = 4; }                                     // <21.2s
+  let effort;
+  if      (avg > SEGMENT * 7) { effort = 2; }  // >52.5s — last resort
+  else if (avg > SEGMENT * 6) { effort = 3; }  // >45.0s
+  else if (avg > SEGMENT * 5) { effort = 4; }  // >37.5s
+  else if (avg > SEGMENT * 4) { effort = 5; }  // >30.0s
+  else if (avg > SEGMENT * 3) { effort = 6; }  // >22.5s
+  else if (avg > SEGMENT * 2) { effort = 7; }  // >15.0s
+  else if (avg > SEGMENT * 1) { effort = 8; }  // >7.5s
+  else                        { effort = 9; }  // <7.5s  — FULL MAX
+
+  const state =
+    effort >= 9 ? 'COLD' :
+    effort >= 7 ? 'COOL' :
+    effort >= 5 ? 'WARM' :
+    effort >= 3 ? 'HOT' :
+                  'CRITICAL';
 
   metrics.chronosStateHistory.push({ state, effort, avg: Math.round(avg), time: Date.now() });
   if (metrics.chronosStateHistory.length > 100) {
@@ -1066,9 +1078,8 @@ export default async function compress(req, res, buffer) {
       }
 
       const FORCE_EFFORT = parseInt(process.env.FORCE_EFFORT) || 0;
-const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
-// 🛑 SURGICAL FIX: FORCE_EFFORT overrides Chronos. Set FORCE_EFFORT=4 in env to lock effort.
-const adaptiveEffort = FORCE_EFFORT > 0 ? FORCE_EFFORT : chronos.effort;
+const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 9 };
+const adaptiveEffort = chronos.effort;
 
       // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
       // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
