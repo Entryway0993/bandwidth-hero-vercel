@@ -199,19 +199,20 @@ function getAverageEncodeTime() {
 function getChronosState() {
   const avg = getAverageEncodeTime();
 
-  // 🛑 SURGICAL FIX: Full 100% of 53s budget. 8 gradual effort levels (2→9).
-  const ENCODE_BUDGET_MS = 53000;
-  const SEGMENT = ENCODE_BUDGET_MS / 8; // 6625ms per step
+  // 🛑 SURGICAL FIX: 100% of 60s budget. No overhead reservation.
+  // 8 gradual effort levels (2→9). User explicitly accepts timeout risk.
+  const ENCODE_BUDGET_MS = 60000;
+  const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
 
   let effort;
-  if      (avg > SEGMENT * 7) { effort = 2; }  // >46.4s  — last resort before wall
-  else if (avg > SEGMENT * 6) { effort = 3; }  // >39.8s
-  else if (avg > SEGMENT * 5) { effort = 4; }  // >33.1s
-  else if (avg > SEGMENT * 4) { effort = 5; }  // >26.5s
-  else if (avg > SEGMENT * 3) { effort = 6; }  // >19.9s
-  else if (avg > SEGMENT * 2) { effort = 7; }  // >13.3s
-  else if (avg > SEGMENT * 1) { effort = 8; }  // >6.6s
-  else                        { effort = 9; }  // <6.6s   — FULL MAX
+  if      (avg > SEGMENT * 7) { effort = 2; }  // >52.5s — last resort
+  else if (avg > SEGMENT * 6) { effort = 3; }  // >45.0s
+  else if (avg > SEGMENT * 5) { effort = 4; }  // >37.5s
+  else if (avg > SEGMENT * 4) { effort = 5; }  // >30.0s
+  else if (avg > SEGMENT * 3) { effort = 6; }  // >22.5s
+  else if (avg > SEGMENT * 2) { effort = 7; }  // >15.0s
+  else if (avg > SEGMENT * 1) { effort = 8; }  // >7.5s
+  else                        { effort = 9; }  // <7.5s  — FULL MAX
 
   const state =
     effort >= 9 ? 'COLD' :
@@ -227,6 +228,7 @@ function getChronosState() {
 
   return { state, effort };
 }
+
 // ============================================================
 // ENVIRONMENT TOGGLES
 // ============================================================
@@ -1069,7 +1071,24 @@ export default async function compress(req, res, buffer) {
 
       const FORCE_EFFORT = parseInt(process.env.FORCE_EFFORT) || 0;
 const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 9 };
-const adaptiveEffort = chronos.effort;
+      
+      // 🛑 SURGICAL FIX: Base effort on PIXEL COUNT to prevent cold-start death loops.
+      // AVIF effort 9 on a 15MP+ image takes minutes. Vercel kills it at 60s.
+      // Pixel count is the hard ceiling. Chronos can only drop it further if the server is lagging.
+      const pixelCount = (metadata.width || 0) * (metadata.height || 0);
+      const millions = pixelCount / 1_000_000;
+      
+      let maxSafeEffort;
+      if (millions > 15)      maxSafeEffort = 2;  // 15MP+ (e.g., 1280x15000): Extreme. Effort 2 to survive.
+      else if (millions > 10) maxSafeEffort = 3;  // 10-15MP: Very large strips. 
+      else if (millions > 6)  maxSafeEffort = 4;  // 6-10MP : Large strips.
+      else if (millions > 3)  maxSafeEffort = 6;  // 3-6MP  : Standard pages.
+      else if (millions > 1)  maxSafeEffort = 8;  // 1-3MP  : Small pages.
+      else                    maxSafeEffort = 9;  // <1MP   : Thumbnails/Icons. MAX QUALITY.
+
+      // Chronos can drop the effort if the server is currently choking,
+      // but it CANNOT exceed the physics-based safe ceiling.
+      const adaptiveEffort = Math.min(maxSafeEffort, chronos.effort);
 
       // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
       // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
