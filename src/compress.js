@@ -18,19 +18,6 @@ const HEALTH_LAG_THRESHOLD = parseInt(process.env.HEALTH_LAG_THRESHOLD) || 100;
 const SHUTDOWN_TIMEOUT = parseInt(process.env.SHUTDOWN_TIMEOUT) || 10000;
 
 // ============================================================
-// 🛑 SURGICAL FIX: Promise Timeout Wrapper
-// Races any promise against a hard timeout to prevent infinite hangs.
-// ============================================================
-
-function withTimeout(promise, ms, label = 'OPERATION') {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label}_TIMEOUT`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-// ============================================================
 // FEATURE 1: THE ORACLE'S LEDGER (Global Telemetry)
 // ============================================================
 
@@ -168,6 +155,9 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 const perceptualCache = new Map();
 const PERCEPTUAL_CACHE_MAX = 500;
 
+const lorekeeperCache = new Map();
+const LOREKEEPER_CACHE_MAX = 200;
+
 // ============================================================
 // FEATURE: THE SEMAPHORE WARDEN (Concurrency Control)
 // ============================================================
@@ -244,6 +234,7 @@ const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
 const ENABLE_LUMINANCE = envBool('ENABLE_LUMINANCE', true);
 const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
 const ENABLE_DESKEW = envBool('ENABLE_DESKEW', true);
+const ENABLE_LOREKEEPER = envBool('ENABLE_LOREKEEPER', true);
 const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
 const ENABLE_DITHER_ASSASSIN = envBool('ENABLE_DITHER_ASSASSIN', true);
 const ENABLE_BANDING_EXORCIST = envBool('ENABLE_BANDING_EXORCIST', true);
@@ -251,7 +242,7 @@ const ENABLE_ALPHA_SENTINEL = envBool('ENABLE_ALPHA_SENTINEL', true);
 const ENABLE_LAYOUT_PROPHET = envBool('ENABLE_LAYOUT_PROPHET', true);
 const ENABLE_ENCODING_VERIFIER = envBool('ENABLE_ENCODING_VERIFIER', true);
 const ENABLE_GHOST_STRIPPER = envBool('ENABLE_GHOST_STRIPPER', true);
-const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', false); // 🛑 Disabled by default to prevent timeouts
+const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', true);
 const ENABLE_METADATA_REAPER = envBool('ENABLE_METADATA_REAPER', true);
 const ENABLE_WEBP_PRESET = envBool('ENABLE_WEBP_PRESET', true);
 const ENABLE_PROGRESSIVE_PNG = envBool('ENABLE_PROGRESSIVE_PNG', true);
@@ -271,15 +262,11 @@ const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
 
 async function generatePerceptualHash(buffer) {
   try {
-    const { data } = await withTimeout(
-      sharp(buffer)
-        .resize(8, 8, { fit: 'fill' })
-        .grayscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      5000,
-      'PERCEPTUAL_HASH'
-    );
+    const { data } = await sharp(buffer)
+      .resize(8, 8, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
     let hash = '';
     const avg = data.reduce((sum, v) => sum + v, 0) / data.length;
@@ -308,14 +295,10 @@ function setPerceptualCache(hash, result) {
 
 async function generatePlaceholderAndPalette(buffer) {
   try {
-    const { data, info } = await withTimeout(
-      sharp(buffer)
-        .resize(32, 32, { fit: 'inside' })
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      5000,
-      'PLACEHOLDER_PALETTE'
-    );
+    const { data, info } = await sharp(buffer)
+      .resize(32, 32, { fit: 'inside' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
     const channels = info.channels;
 
@@ -352,16 +335,12 @@ async function generatePlaceholderAndPalette(buffer) {
 
     let placeholder = null;
     if (ENABLE_PLACEHOLDER && !isVoid) {
-      const thumbBuffer = await withTimeout(
-        sharp(buffer)
-          .resize(32, 32, { fit: 'inside' })
-          .blur(2)
-          .grayscale()
-          .jpeg({ quality: 20 })
-          .toBuffer(),
-        5000,
-        'PLACEHOLDER_THUMB'
-      );
+      const thumbBuffer = await sharp(buffer)
+        .resize(32, 32, { fit: 'inside' })
+        .blur(2)
+        .grayscale()
+        .jpeg({ quality: 20 })
+        .toBuffer();
       placeholder = 'data:image/jpeg;base64,' + thumbBuffer.toString('base64');
     }
 
@@ -373,15 +352,11 @@ async function generatePlaceholderAndPalette(buffer) {
 
 async function detectSkew(buffer) {
   try {
-    const { data, info } = await withTimeout(
-      sharp(buffer)
-        .resize(256, 256, { fit: 'inside' })
-        .grayscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      8000,
-      'SKEW'
-    );
+    const { data, info } = await sharp(buffer)
+      .resize(256, 256, { fit: 'inside' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
     const w = info.width;
     const h = info.height;
@@ -430,6 +405,80 @@ async function detectSkew(buffer) {
   }
 }
 
+function generateLoreHash(buffer) {
+  return createHash('md5').update(buffer).digest('hex').slice(0, 8);
+}
+
+async function readLoreSignature(buffer) {
+  try {
+    const { data, info } = await sharp(buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+    if (channels < 3) return null;
+
+    const blueIdx = 2;
+    let hashStr = '';
+    const maxPixels = Math.min(32, Math.floor(data.length / channels));
+
+    for (let i = 0; i < maxPixels; i++) {
+      hashStr += (data[i * channels + blueIdx] & 1).toString();
+    }
+
+    if (hashStr.length < 32) return null;
+
+    const hashInt = parseInt(hashStr, 2);
+    return hashInt.toString(16).padStart(8, '0');
+  } catch {
+    return null;
+  }
+}
+
+async function embedLoreSignature(buffer, loreHash) {
+  try {
+    const { data, info } = await sharp(buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+    if (channels < 3) return buffer;
+
+    const blueIdx = 2;
+    const hashInt = parseInt(loreHash, 16);
+    const hashBits = hashInt.toString(2).padStart(32, '0');
+
+    const maxPixels = Math.min(32, Math.floor(data.length / channels));
+
+    for (let i = 0; i < maxPixels; i++) {
+      const idx = i * channels + blueIdx;
+      data[idx] = (data[idx] & 0xFE) | parseInt(hashBits[i], 10);
+    }
+
+    const outputBuffer = await sharp(data, {
+      raw: { width: info.width, height: info.height, channels: channels },
+    }).png().toBuffer();
+
+    return outputBuffer;
+  } catch {
+    return buffer;
+  }
+}
+
+function checkLoreCache(hash) {
+  if (!hash) return null;
+  return lorekeeperCache.get(hash) || null;
+}
+
+function setLoreCache(hash, result) {
+  if (!hash) return;
+  if (lorekeeperCache.size >= LOREKEEPER_CACHE_MAX) {
+    const firstKey = lorekeeperCache.keys().next().value;
+    lorekeeperCache.delete(firstKey);
+  }
+  lorekeeperCache.set(hash, result);
+}
+
 let _noiseTilePromise = null;
 function getNoiseTile() {
   if (!_noiseTilePromise) {
@@ -457,14 +506,10 @@ async function detectAlphaStrippable(buffer, metadata) {
 
   try {
     const sampleSize = 64;
-    const { data, info } = await withTimeout(
-      sharp(buffer)
-        .resize(sampleSize, sampleSize, { fit: 'inside' })
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      5000,
-      'ALPHA'
-    );
+    const { data, info } = await sharp(buffer)
+      .resize(sampleSize, sampleSize, { fit: 'inside' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
     const channels = info.channels;
     const alphaIdx = channels - 1;
@@ -503,29 +548,17 @@ function verifyOutput(buffer, format) {
 
 async function formatDuel(buffer, targetQuality) {
   try {
-    const sample = await withTimeout(
-      sharp(buffer)
-        .resize(256, 256, { fit: 'inside', withoutEnlargement: true })
-        .toBuffer(),
-      8000,
-      'FORMAT_DUEL_SAMPLE'
-    );
+    const sample = await sharp(buffer)
+      .resize(256, 256, { fit: 'inside', withoutEnlargement: true })
+      .toBuffer();
 
-    const avifSample = await withTimeout(
-      sharp(sample)
-        .avif({ quality: Math.min(targetQuality, 63), effort: 1 })
-        .toBuffer(),
-      8000,
-      'FORMAT_DUEL_AVIF'
-    );
+    const avifSample = await sharp(sample)
+      .avif({ quality: Math.min(targetQuality, 63), effort: 2 })
+      .toBuffer();
 
-    const webpSample = await withTimeout(
-      sharp(sample)
-        .webp({ quality: targetQuality, effort: 1 })
-        .toBuffer(),
-      8000,
-      'FORMAT_DUEL_WEBP'
-    );
+    const webpSample = await sharp(sample)
+      .webp({ quality: targetQuality, effort: 2 })
+      .toBuffer();
 
     if (avifSample.length <= webpSample.length) {
       return { winner: 'avif', avifSize: avifSample.length, webpSize: webpSample.length };
@@ -600,15 +633,11 @@ async function detectHalftone(buffer, metadata, analysis) {
     const left = Math.floor((width - sampleSize) / 2);
     const top = Math.floor((height - sampleSize) / 2);
 
-    const { data } = await withTimeout(
-      sharp(buffer)
-        .extract({ left, top, width: sampleSize, height: sampleSize })
-        .grayscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      8000,
-      'HALFTONE'
-    );
+    const { data } = await sharp(buffer)
+      .extract({ left, top, width: sampleSize, height: sampleSize })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
     let microSum = 0;
     let microCount = 0;
@@ -675,15 +704,11 @@ async function detectLineArt(buffer, analysis) {
   }
 
   try {
-    const { data } = await withTimeout(
-      sharp(buffer)
-        .resize(256, 256, { fit: 'inside' })
-        .grayscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      8000,
-      'LINEART'
-    );
+    const { data } = await sharp(buffer)
+      .resize(256, 256, { fit: 'inside' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
     const hist = new Array(256).fill(0);
     for (let i = 0; i < data.length; i++) {
@@ -717,11 +742,7 @@ async function detectLineArt(buffer, analysis) {
 }
 
 async function detectImageType(buffer, metadata) {
-  const stats = await withTimeout(
-    sharp(buffer).stats(),
-    8000,
-    'IMAGE_TYPE'
-  );
+  const stats = await sharp(buffer).stats();
   const { channels, width, height } = stats;
 
   let totalEntropy = 0;
@@ -796,6 +817,7 @@ function getViewportMaxDim(req) {
 }
 
 function getChromaSubsampling(analysis) {
+  // 🛑 SURVIVAL PATCH: Kept from original audit. '4:0:0' and '4:2:2' throw fatal exceptions in sharp.
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
   return '4:2:0';
 }
@@ -822,18 +844,7 @@ export default async function compress(req, res, buffer) {
   const abortController = new AbortController();
   const { signal } = abortController;
 
-  // 🛑 SURGICAL FIX: Hard Timeout Guard at 20s.
-  // Every sharp operation is individually bounded by withTimeout.
-  const HARD_TIMEOUT_MS = 20000;
-  const hardTimeout = setTimeout(() => {
-    abortController.abort();
-  }, HARD_TIMEOUT_MS);
-
   let clientDisconnected = false;
-
-  // 🛑 SURGICAL FIX: FAST MODE threshold reduced to 1MB.
-  // Images > 1MB skip heavy analysis to guarantee survival.
-  const IS_LARGE_IMAGE = buffer.length > 1 * 1024 * 1024;
 
   if (ENABLE_TIMEOUT_GUILLOTINE) {
     req.on('close', () => {
@@ -854,12 +865,7 @@ export default async function compress(req, res, buffer) {
       return Buffer.alloc(0);
     }
 
-    // 🛑 SURGICAL FIX: Timeout on metadata call.
-    const metadata = await withTimeout(
-      sharp(buffer).metadata(),
-      10000,
-      'METADATA'
-    );
+    const metadata = await sharp(buffer).metadata();
     const format = metadata.format;
 
     if (!format || format === 'raw') {
@@ -897,7 +903,7 @@ export default async function compress(req, res, buffer) {
     }
 
     let thumbResult = null;
-    if (!IS_LARGE_IMAGE && (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER)) {
+    if (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) {
       thumbResult = await generatePlaceholderAndPalette(buffer);
 
       if (ENABLE_VOID_WATCHER && thumbResult.isVoid) {
@@ -915,6 +921,30 @@ export default async function compress(req, res, buffer) {
       res.setHeader('X-Timeout-Guillotine', 'ABORTED');
       res.status(499);
       return Buffer.alloc(0);
+    }
+
+    let loreHash = null;
+    let loreHit = false;
+    if (ENABLE_LOREKEEPER && format === 'png') {
+      loreHash = await readLoreSignature(buffer);
+      if (loreHash) {
+        const loreCached = checkLoreCache(loreHash);
+        if (loreCached) {
+          loreHit = true;
+          res.setHeader('X-Lorekeeper', 'HIT');
+          res.setHeader('Content-Type', loreCached.contentType);
+          if (loreCached.placeholder) res.setHeader('X-Placeholder', loreCached.placeholder);
+          if (loreCached.grade) res.setHeader('X-Quality-Grade', loreCached.grade);
+          if (loreCached.palette && loreCached.palette.length > 0) {
+            res.setHeader('X-Palette', loreCached.palette.join(','));
+          }
+          if (ENABLE_ORACLE_LEDGER) {
+            metrics.totalBytesOut += loreCached.buffer.length;
+            metrics.totalBytesSaved += buffer.length - loreCached.buffer.length;
+          }
+          return loreCached.buffer;
+        }
+      }
     }
 
     const pHash = await generatePerceptualHash(buffer);
@@ -946,7 +976,6 @@ export default async function compress(req, res, buffer) {
       return Buffer.alloc(0);
     }
 
-    // --- FEATURE: THE SEMAPHORE WARDEN ---
     let semaphoreAcquired = false;
     if (ENABLE_SEMAPHORE_WARDEN) {
       semaphoreAcquired = acquireSemaphore();
@@ -965,33 +994,7 @@ export default async function compress(req, res, buffer) {
     }
 
     try {
-      let analysis;
-      if (IS_LARGE_IMAGE) {
-        res.setHeader('X-Fast-Mode', 'ACTIVE');
-        analysis = {
-          isGrayscale: false,
-          isHighContrast: false,
-          isColorful: false,
-          isMangaStrip: false,
-          isMangaPage: false,
-          isAnime: false,
-          entropy: 5,
-          sharpness: 50,
-          colorVariance: 0,
-          aspectRatio: (metadata.height || 1) / (metadata.width || 1),
-          meanLuminance: 128,
-          stdevLuminance: 50,
-          maxLuminance: 255,
-        };
-      } else {
-        analysis = await detectImageType(buffer, metadata);
-      }
-      
-      if (signal.aborted) {
-        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-        return Buffer.alloc(0);
-      }
-
+      const analysis = await detectImageType(buffer, metadata);
       const viewportMaxDim = getViewportMaxDim(req);
 
       let placeholder = thumbResult ? thumbResult.placeholder : null;
@@ -1002,7 +1005,7 @@ export default async function compress(req, res, buffer) {
       }
 
       let skewAngle = 0;
-      if (!IS_LARGE_IMAGE && ENABLE_DESKEW && !analysis.isMangaStrip) {
+      if (ENABLE_DESKEW && !analysis.isMangaStrip) {
         skewAngle = await detectSkew(buffer);
         if (skewAngle !== 0) {
           res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
@@ -1022,30 +1025,18 @@ export default async function compress(req, res, buffer) {
       }
 
       let halftoneResult = null;
-      if (!IS_LARGE_IMAGE && ENABLE_MOIRE) {
+      if (ENABLE_MOIRE) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
 
-      if (signal.aborted) {
-        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-        res.status(499);
-        return Buffer.alloc(0);
-      }
-
       let lineArtResult = null;
-      if (!IS_LARGE_IMAGE && (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN)) {
+      if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
         lineArtResult = await detectLineArt(buffer, analysis);
-      }
-
-      if (signal.aborted) {
-        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-        res.status(499);
-        return Buffer.alloc(0);
       }
 
       let alphaStrippable = false;
       const isAnimated = metadata.pages > 1;
-      if (!IS_LARGE_IMAGE && ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
+      if (ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
         alphaStrippable = await detectAlphaStrippable(buffer, metadata);
         if (alphaStrippable) {
           res.setHeader('X-Alpha-Sentinel', 'STRIPPED');
@@ -1060,7 +1051,7 @@ export default async function compress(req, res, buffer) {
       }
 
       const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
-      const adaptiveEffort = IS_LARGE_IMAGE ? 1 : chronos.effort;
+      const adaptiveEffort = chronos.effort;
 
       const requestedFormat = req.query.f || req.query.format;
       let outputFormat = 'jpeg';
@@ -1076,7 +1067,6 @@ export default async function compress(req, res, buffer) {
         const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
         const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
 
-        // 🛑 SURGICAL FIX: formatDuel disabled by default. Use Accept header directly.
         if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
           const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
           let quality = calculateQuality(analysis, baseQuality);
@@ -1085,12 +1075,6 @@ export default async function compress(req, res, buffer) {
           }
 
           const duel = await formatDuel(buffer, quality);
-          
-          if (signal.aborted) {
-            res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-            return Buffer.alloc(0);
-          }
-
           outputFormat = duel.winner;
           res.setHeader('X-Format-Duelist', `${duel.winner.toUpperCase()} (AVIF:${duel.avifSize} vs WebP:${duel.webpSize})`);
           recordMetric('formatDuelist');
@@ -1144,7 +1128,7 @@ export default async function compress(req, res, buffer) {
 
       let pipeline = sharp(buffer, {
         animated: isAnimated,
-        limitInputPixels: 60000000,
+        limitInputPixels: 268402689, // 🛑 REVERTED: Original massive limit restored.
       });
 
       if (ENABLE_METADATA_REAPER) {
@@ -1294,6 +1278,7 @@ export default async function compress(req, res, buffer) {
       const encodeStart = Date.now();
 
       const needsBuffer = ENABLE_ENCODING_VERIFIER ||
+                          ENABLE_LOREKEEPER ||
                           ditherAssassinActive ||
                           (outputFormat === 'png' && !ENABLE_PROGRESSIVE_PNG);
 
@@ -1364,23 +1349,12 @@ export default async function compress(req, res, buffer) {
           });
         }
 
-        // 🛑 SURGICAL FIX: Race the stream against a 30s timeout.
-        try {
-          await withTimeout(
-            new Promise((resolve, reject) => {
-              passthrough.on('finish', resolve);
-              passthrough.on('error', reject);
-              passthrough.on('close', resolve);
-              pipeline.on('error', reject);
-            }),
-            30000,
-            'STREAM_ENCODE'
-          );
-        } catch {
-          // Stream timed out. Response may be partially sent. Just end it.
-          if (!res.writableEnded) res.end();
-          return null;
-        }
+        await new Promise((resolve, reject) => {
+          passthrough.on('finish', resolve);
+          passthrough.on('error', reject);
+          passthrough.on('close', resolve); // 🛑 SURVIVAL PATCH: Kept to prevent hanging on client disconnect.
+          pipeline.on('error', reject);
+        });
 
         const encodeEnd = Date.now();
         const encodeTime = encodeEnd - encodeStart;
@@ -1398,24 +1372,16 @@ export default async function compress(req, res, buffer) {
         return null;
       }
 
-      // Buffer mode encoding
-      // 🛑 SURGICAL FIX: Race the final encode against a 30s timeout.
-      const ENCODE_TIMEOUT_MS = 30000;
-
       if (ditherAssassinActive) {
         pipeline = pipeline.threshold(128);
 
-        outputBuffer = await withTimeout(
-          pipeline.png({
-            palette: true,
-            colours: 2,
-            compressionLevel: 9,
-            dither: 0,
-            progressive: ENABLE_PROGRESSIVE_PNG,
-          }).toBuffer(),
-          ENCODE_TIMEOUT_MS,
-          'ENCODE_DITHER'
-        );
+        outputBuffer = await pipeline.png({
+          palette: true,
+          colours: 2,
+          compressionLevel: 9,
+          dither: 0,
+          progressive: ENABLE_PROGRESSIVE_PNG,
+        }).toBuffer();
         contentType = 'image/png';
         res.setHeader('X-Dither-Assassin', 'ACTIVE');
       } else {
@@ -1423,29 +1389,21 @@ export default async function compress(req, res, buffer) {
 
         switch (outputFormat) {
           case 'avif':
-            outputBuffer = await withTimeout(
-              pipeline.avif({
-                quality: Math.min(quality, 63),
-                effort: adaptiveEffort,
-                chromaSubsampling: chromaSubsampling,
-              }).toBuffer(),
-              ENCODE_TIMEOUT_MS,
-              'ENCODE_AVIF'
-            );
+            outputBuffer = await pipeline.avif({
+              quality: Math.min(quality, 63),
+              effort: adaptiveEffort,
+              chromaSubsampling: chromaSubsampling,
+            }).toBuffer();
             contentType = 'image/avif';
             break;
 
           case 'webp':
-            outputBuffer = await withTimeout(
-              pipeline.webp({
-                quality: quality,
-                effort: adaptiveEffort,
-                smartSubsample: true,
-                preset: getWebpPreset(analysis, lineArtResult, origW, origH),
-              }).toBuffer(),
-              ENCODE_TIMEOUT_MS,
-              'ENCODE_WEBP'
-            );
+            outputBuffer = await pipeline.webp({
+              quality: quality,
+              effort: adaptiveEffort,
+              smartSubsample: true,
+              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+            }).toBuffer();
             contentType = 'image/webp';
             break;
 
@@ -1458,31 +1416,23 @@ export default async function compress(req, res, buffer) {
             );
 
             if (useQuantumSorcerer) {
-              outputBuffer = await withTimeout(
-                pipeline.png({
-                  compressionLevel: 8,
-                  palette: true,
-                  colours: 256,
-                  dither: 1.0,
-                  quality: quality,
-                  progressive: ENABLE_PROGRESSIVE_PNG,
-                }).toBuffer(),
-                ENCODE_TIMEOUT_MS,
-                'ENCODE_PNG_QUANTUM'
-              );
+              outputBuffer = await pipeline.png({
+                compressionLevel: 8,
+                palette: true,
+                colours: 256,
+                dither: 1.0,
+                quality: quality,
+                progressive: ENABLE_PROGRESSIVE_PNG,
+              }).toBuffer();
               res.setHeader('X-Quantum-Sorcerer', 'ACTIVE');
               recordMetric('quantumSorcerer');
             } else {
-              outputBuffer = await withTimeout(
-                pipeline.png({
-                  compressionLevel: 8,
-                  palette: analysis.isGrayscale,
-                  quality: quality,
-                  progressive: ENABLE_PROGRESSIVE_PNG,
-                }).toBuffer(),
-                ENCODE_TIMEOUT_MS,
-                'ENCODE_PNG'
-              );
+              outputBuffer = await pipeline.png({
+                compressionLevel: 8,
+                palette: analysis.isGrayscale,
+                quality: quality,
+                progressive: ENABLE_PROGRESSIVE_PNG,
+              }).toBuffer();
             }
             contentType = 'image/png';
             break;
@@ -1490,19 +1440,15 @@ export default async function compress(req, res, buffer) {
 
           case 'jpeg':
           default:
-            outputBuffer = await withTimeout(
-              pipeline.jpeg({
-                quality: quality,
-                progressive: true,
-                mozjpeg: true,
-                chromaSubsampling: chromaSubsampling,
-                trellisQuantisation: true,
-                overshootDeringing: true,
-                optimiseScans: true,
-              }).toBuffer(),
-              ENCODE_TIMEOUT_MS,
-              'ENCODE_JPEG'
-            );
+            outputBuffer = await pipeline.jpeg({
+              quality: quality,
+              progressive: true,
+              mozjpeg: true,
+              chromaSubsampling: chromaSubsampling,
+              trellisQuantisation: true,
+              overshootDeringing: true,
+              optimiseScans: true,
+            }).toBuffer();
             contentType = 'image/jpeg';
             break;
         }
@@ -1565,6 +1511,20 @@ export default async function compress(req, res, buffer) {
         res.setHeader('X-Bytes-Saved', `${(bytesSaved / 1024).toFixed(1)}KB`);
       }
 
+      if (ENABLE_LOREKEEPER && outputFormat === 'png' && !loreHit && !ditherAssassinActive) {
+        const newLoreHash = generateLoreHash(buffer);
+        outputBuffer = await embedLoreSignature(outputBuffer, newLoreHash);
+        setLoreCache(newLoreHash, {
+          buffer: outputBuffer,
+          contentType: contentType,
+          placeholder: placeholder,
+          grade: judgeResult ? judgeResult.grade : null,
+          palette: palette,
+        });
+        res.setHeader('X-Lorekeeper', 'EMBEDDED');
+        recordMetric('lorekeeper');
+      }
+
       setPerceptualCache(pHash, {
         buffer: outputBuffer,
         contentType: contentType,
@@ -1601,29 +1561,18 @@ export default async function compress(req, res, buffer) {
     }
 
   } catch (err) {
-    // 🛑 SURGICAL FIX: Handle OPERATION_TIMEOUT errors by returning raw image.
-    const isTimeout = err.message && err.message.includes('_TIMEOUT');
-    
-    if (clientDisconnected || signal.aborted || isTimeout) {
-      if (!res.headersSent) {
-        res.setHeader('X-Timeout-Guillotine', isTimeout ? 'OPERATION_TIMEOUT' : 'ABORTED');
-        res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
-      }
-      if (!res.writableEnded) {
-        res.end(buffer);
-      }
-      return null;
+    if (clientDisconnected || signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      return Buffer.alloc(0);
     }
-    
     console.error('[COMPRESS ERROR]', err.message);
-    
+    res.setHeader('X-Compression', 'FAILED');
     if (ENABLE_ORACLE_LEDGER) {
       metrics.encodingFailures++;
       metrics.totalBytesOut += buffer.length;
     }
-
+    // 🛑 SURVIVAL PATCH: Kept to prevent the Vercel dangling socket 504 timeout.
     if (!res.headersSent && !res.writableEnded) {
-      res.setHeader('X-Compression', 'FAILED');
       res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
       res.end(buffer); 
     } else if (!res.writableEnded) {
@@ -1631,7 +1580,6 @@ export default async function compress(req, res, buffer) {
     }
     return null;
   } finally {
-    clearTimeout(hardTimeout);
     activeRequests--;
   }
-}
+                      }
