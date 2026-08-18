@@ -11,7 +11,6 @@ const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identi
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
-// 🛑 THE UPSTREAM CONDITIONAL FETCHER (Bandwidth Skipping)
 const RAW_VAULT_MAX_BYTES = 30 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRY = 5 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRIES = 50;
@@ -150,171 +149,161 @@ export default async function proxy(req, res) {
 
   const abortController = new AbortController();
   let isAborted = false;
-
-  // 🛑 SURGICAL FIX: Hard Timeout Guard for the entire proxy function.
-  const PROXY_HARD_TIMEOUT_MS = 50000;
-  const proxyHardTimeout = setTimeout(() => {
-    isAborted = true;
-    abortController.abort();
-  }, PROXY_HARD_TIMEOUT_MS);
-
   res.on('close', () => {
     isAborted = true;
     abortController.abort();
   });
 
+  let targetUrl = req.opts?.url || req.query?.url;
+
+  if (Array.isArray(targetUrl)) {
+    targetUrl = targetUrl.find(u => u && typeof u === 'string') || String(targetUrl[0]);
+  }
+
+  if (!targetUrl || typeof targetUrl !== 'string') {
+    return sendGhost(res, 60);
+  }
+
+  targetUrl = targetUrl.trim();
+  if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
+
   try {
-    let targetUrl = req.opts?.url || req.query?.url;
+    targetUrl = new URL(targetUrl).href;
+  } catch {
+    return sendGhost(res, 60);
+  }
 
-    if (Array.isArray(targetUrl)) {
-      targetUrl = targetUrl.find(u => u && typeof u === 'string') || String(targetUrl[0]);
-    }
+  const etag = generateETag(req, targetUrl);
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
 
-    if (!targetUrl || typeof targetUrl !== 'string') {
-      return sendGhost(res, 60);
-    }
+  const { 'user-agent': userAgent } = req.headers;
 
-    targetUrl = targetUrl.trim();
-    if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
+  const queryReferer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
+  let autoReferer = '';
+  try {
+    const parsedTarget = new URL(targetUrl);
+    autoReferer = parsedTarget.origin;
+  } catch {}
 
-    try {
-      targetUrl = new URL(targetUrl).href;
-    } catch {
-      return sendGhost(res, 60);
-    }
+  const finalReferer = (queryReferer && typeof queryReferer === 'string') ? queryReferer : autoReferer;
 
-    const etag = generateETag(req, targetUrl);
-    if (req.headers['if-none-match'] === etag) {
-      return res.status(304).end();
-    }
+  const headers = {
+    'user-agent': userAgent || getRandomUA(),
+    accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'accept-encoding': UPSTREAM_ACCEPT_ENCODING,
+    'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
+    'sec-fetch-dest': 'image',
+    'sec-fetch-mode': 'no-cors',
+    'sec-fetch-site': 'cross-site',
+    'sec-ch-ua': '"Chromium";v="148", "Not;A=Brand";v="24", "Google Chrome";v="148"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    ...(finalReferer ? { referer: finalReferer } : {})
+  };
 
-    const { 'user-agent': userAgent } = req.headers;
+  const vaultEntry = vaultGet(targetUrl);
+  if (vaultEntry) {
+    if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
+    if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
+  }
 
-    const queryReferer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
-    let autoReferer = '';
-    try {
-      const parsedTarget = new URL(targetUrl);
-      autoReferer = parsedTarget.origin;
-    } catch {}
-
-    const finalReferer = (queryReferer && typeof queryReferer === 'string') ? queryReferer : autoReferer;
-
-    const headers = {
-      'user-agent': userAgent || getRandomUA(),
-      accept: req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-      'accept-encoding': UPSTREAM_ACCEPT_ENCODING,
-      'accept-language': req.headers['accept-language'] || 'en-US,en;q=0.9',
-      'sec-fetch-dest': 'image',
-      'sec-fetch-mode': 'no-cors',
-      'sec-fetch-site': 'cross-site',
-      'sec-ch-ua': '"Chromium";v="148", "Not;A=Brand";v="24", "Google Chrome";v="148"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
-      ...(finalReferer ? { referer: finalReferer } : {})
-    };
-
-    const vaultEntry = vaultGet(targetUrl);
-    if (vaultEntry) {
-      if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
-      if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
-    }
-
-    const config = {
-      headers,
-      dnsLookup: safeLookup,
-      agent: { https: chromeCipherAgent },
-      timeout: { request: REQUEST_TIMEOUT_MS, response: REQUEST_TIMEOUT_MS },
-      responseType: 'buffer',
-      decompress: true,
-      throwHttpErrors: false,
-      followRedirect: true,
-      retry: { limit: 0 },
-      hooks: {
-        beforeRedirect: [
-          (options) => {
-            const redirectUrl = options?.url?.href || String(options?.url || '');
-            if (!parseSafeUrl(redirectUrl)) {
-              const error = new Error('SSRF_BLOCKED_REDIRECT');
-              error.code = 'SSRF_BLOCKED_REDIRECT';
-              throw error;
-            }
+  const config = {
+    headers,
+    dnsLookup: safeLookup,
+    agent: { https: chromeCipherAgent },
+    timeout: { request: REQUEST_TIMEOUT_MS, response: REQUEST_TIMEOUT_MS },
+    responseType: 'buffer',
+    decompress: true,
+    throwHttpErrors: false,
+    followRedirect: true,
+    retry: { limit: 0 },
+    hooks: {
+      beforeRedirect: [
+        (options) => {
+          const redirectUrl = options?.url?.href || String(options?.url || '');
+          if (!parseSafeUrl(redirectUrl)) {
+            const error = new Error('SSRF_BLOCKED_REDIRECT');
+            error.code = 'SSRF_BLOCKED_REDIRECT';
+            throw error;
           }
-        ]
-      }
-    };
-
-    let workerBase = process.env.CF_WORKER_URL || '';
-    if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
-    if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
-    if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
-
-    let fetchUrl = targetUrl;
-    let fetchConfig = config;
-    let isWorkerFetch = false;
-
-    const WORKER_REQUEST_TIMEOUT_MS = 10000;
-
-    if (workerBase && workerBase.startsWith('https://')) {
-      const internalKey = process.env.INTERNAL_KEY;
-      if (internalKey) {
-        isWorkerFetch = true;
-        fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
-        fetchConfig = {
-          headers: { ...config.headers, 'x-internal-key': internalKey },
-          timeout: { request: WORKER_REQUEST_TIMEOUT_MS, response: WORKER_REQUEST_TIMEOUT_MS },
-          responseType: 'buffer',
-          decompress: true,
-          throwHttpErrors: false,
-          followRedirect: true,
-          retry: { limit: 0 }
-        };
-      }
-    }
-
-    let response;
-    let statusCode;
-    let responseHeaders;
-    let activeUrl = fetchUrl;
-    let activeConfig = fetchConfig;
-
-    try {
-      response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
-      statusCode = response.statusCode;
-      responseHeaders = response.headers;
-
-      if (isWorkerFetch && statusCode >= 500 && statusCode < 600) {
-        throw new Error('WORKER_5XX_FAILURE');
-      }
-    } catch (err) {
-      if (isAborted) return;
-
-      if (isWorkerFetch) {
-        activeUrl = targetUrl;
-        activeConfig = config;
-        try {
-          response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
-          statusCode = response.statusCode;
-          responseHeaders = response.headers;
-        } catch (fallbackErr) {
-          if (isAborted) return;
-          throw fallbackErr;
         }
-      } else {
-        throw err;
-      }
+      ]
     }
+  };
 
-    if (statusCode === 403) {
-      const retryHeaders = { ...activeConfig.headers, 'user-agent': getRandomUA() };
+  let workerBase = process.env.CF_WORKER_URL || '';
+  if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
+  if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
+  if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
+
+  let fetchUrl = targetUrl;
+  let fetchConfig = config;
+  let isWorkerFetch = false;
+
+  if (workerBase && workerBase.startsWith('https://')) {
+    const internalKey = process.env.INTERNAL_KEY;
+    if (internalKey) {
+      isWorkerFetch = true;
+      fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
+      fetchConfig = {
+        headers: { ...config.headers, 'x-internal-key': internalKey },
+        timeout: config.timeout,
+        responseType: 'buffer',
+        decompress: true,
+        throwHttpErrors: false,
+        followRedirect: true,
+        retry: { limit: 0 }
+      };
+    }
+  }
+
+  let response;
+  let statusCode;
+  let responseHeaders;
+  let activeUrl = fetchUrl;
+  let activeConfig = fetchConfig;
+
+  try {
+    response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
+    statusCode = response.statusCode;
+    responseHeaders = response.headers;
+
+    if (isWorkerFetch && statusCode >= 500 && statusCode < 600) {
+      throw new Error('WORKER_5XX_FAILURE');
+    }
+  } catch (err) {
+    if (isAborted) return;
+
+    if (isWorkerFetch) {
+      activeUrl = targetUrl;
+      activeConfig = config;
       try {
-        response = await safeExecuteFetch(activeUrl, { ...activeConfig, headers: retryHeaders }, abortController.signal);
+        response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
         statusCode = response.statusCode;
         responseHeaders = response.headers;
-      } catch (err) {
+      } catch (fallbackErr) {
         if (isAborted) return;
+        throw fallbackErr;
       }
+    } else {
+      throw err;
     }
+  }
 
+  if (statusCode === 403) {
+    const retryHeaders = { ...activeConfig.headers, 'user-agent': getRandomUA() };
+    try {
+      response = await safeExecuteFetch(activeUrl, { ...activeConfig, headers: retryHeaders }, abortController.signal);
+      statusCode = response.statusCode;
+      responseHeaders = response.headers;
+    } catch (err) {
+      if (isAborted) return;
+    }
+  }
+
+  try {
     let rawBody;
 
     if (statusCode === 304 && vaultEntry) {
@@ -413,8 +402,7 @@ export default async function proxy(req, res) {
     if (shouldCompress(req, rawBody)) {
       const compressedResult = await compress(req, res, rawBody);
       
-      // 🛑 SURGICAL FIX: compress.js returns a Buffer in buffer mode but doesn't call res.end().
-      // We MUST close the HTTP response here to prevent the Vercel 60s timeout.
+      // 🛑 SURVIVAL PATCH: Kept to close the socket and prevent Vercel 60s timeout.
       if (!res.writableEnded) {
         if (compressedResult && compressedResult.length > 0) {
           res.end(compressedResult);
@@ -428,10 +416,7 @@ export default async function proxy(req, res) {
     return bypass(req, res, rawBody, statusCode);
 
   } catch (error) {
-    if (isAborted) {
-      if (!res.writableEnded) res.end();
-      return;
-    }
+    if (isAborted) return;
 
     const isBodyTooLarge =
       error.message === 'BODY_TOO_LARGE' ||
@@ -451,7 +436,5 @@ export default async function proxy(req, res) {
     }
 
     return sendGhost(res, 60);
-  } finally {
-    clearTimeout(proxyHardTimeout);
   }
       }
