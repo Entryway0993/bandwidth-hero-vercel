@@ -1454,6 +1454,7 @@ export default async function compress(req, res, buffer) {
         adaptiveEffort,
         origW,
         origH,
+        aspectRatio: analysis.aspectRatio, // 🛑 ADD THIS LINE
         targetWidth,
         targetHeight,
         bufferLength: outputBuffer?.length || 0,
@@ -1462,7 +1463,7 @@ export default async function compress(req, res, buffer) {
         isMangaStrip: analysis.isMangaStrip,
         isMangaPage: analysis.isMangaPage,
       }));
-
+      
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
