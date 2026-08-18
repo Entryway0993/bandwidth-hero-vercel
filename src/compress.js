@@ -196,23 +196,33 @@ function getAverageEncodeTime() {
   return rollingEncodeTimes.reduce((a, b) => a + b, 0) / rollingEncodeTimes.length;
 }
 
-function getChronosState() {
+function getChronosState(pixelCount) {
+  // 🛑 SURGICAL FIX: Cold-start safeguard.
+  // On the very first request, we have no history. Effort 9 on a 15MP image will timeout.
+  // Use a safe baseline for the first request, then let Chronos learn from actual times.
+  if (rollingEncodeTimes.length === 0) {
+    const millions = pixelCount / 1_000_000;
+    let effort = 9;
+    if (millions > 15) effort = 4;
+    else if (millions > 8) effort = 6;
+    return { state: 'COLD-START', effort };
+  }
+
   const avg = getAverageEncodeTime();
 
-  // 🛑 SURGICAL FIX: 100% of 60s budget. No overhead reservation.
-  // 8 gradual effort levels (2→9). User explicitly accepts timeout risk.
+  // 100% of 60s budget. 8 gradual effort levels (2→9).
   const ENCODE_BUDGET_MS = 60000;
   const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
 
   let effort;
-  if      (avg > SEGMENT * 7) { effort = 2; }  // >52.5s — last resort
+  if      (avg > SEGMENT * 7) { effort = 2; }  // >52.5s
   else if (avg > SEGMENT * 6) { effort = 3; }  // >45.0s
   else if (avg > SEGMENT * 5) { effort = 4; }  // >37.5s
   else if (avg > SEGMENT * 4) { effort = 5; }  // >30.0s
   else if (avg > SEGMENT * 3) { effort = 6; }  // >22.5s
   else if (avg > SEGMENT * 2) { effort = 7; }  // >15.0s
   else if (avg > SEGMENT * 1) { effort = 8; }  // >7.5s
-  else                        { effort = 9; }  // <7.5s  — FULL MAX
+  else                        { effort = 9; }  // <7.5s
 
   const state =
     effort >= 9 ? 'COLD' :
@@ -1069,26 +1079,12 @@ export default async function compress(req, res, buffer) {
         return Buffer.alloc(0);
       }
 
-      const FORCE_EFFORT = parseInt(process.env.FORCE_EFFORT) || 0;
-const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 9 };
-      
-      // 🛑 SURGICAL FIX: Base effort on PIXEL COUNT to prevent cold-start death loops.
-      // AVIF effort 9 on a 15MP+ image takes minutes. Vercel kills it at 60s.
-      // Pixel count is the hard ceiling. Chronos can only drop it further if the server is lagging.
       const pixelCount = (metadata.width || 0) * (metadata.height || 0);
-      const millions = pixelCount / 1_000_000;
+      const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState(pixelCount) : { state: 'COLD', effort: 9 };
       
-      let maxSafeEffort;
-      if (millions > 15)      maxSafeEffort = 2;  // 15MP+ (e.g., 1280x15000): Extreme. Effort 2 to survive.
-      else if (millions > 10) maxSafeEffort = 3;  // 10-15MP: Very large strips. 
-      else if (millions > 6)  maxSafeEffort = 4;  // 6-10MP : Large strips.
-      else if (millions > 3)  maxSafeEffort = 6;  // 3-6MP  : Standard pages.
-      else if (millions > 1)  maxSafeEffort = 8;  // 1-3MP  : Small pages.
-      else                    maxSafeEffort = 9;  // <1MP   : Thumbnails/Icons. MAX QUALITY.
-
-      // Chronos can drop the effort if the server is currently choking,
-      // but it CANNOT exceed the physics-based safe ceiling.
-      const adaptiveEffort = Math.min(maxSafeEffort, chronos.effort);
+      // 🛑 SURGICAL FIX: Removed maxSafeEffort ceiling. 
+      // Chronos now has full control to use the 60s budget as requested.
+      const adaptiveEffort = chronos.effort;
 
       // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
       // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
@@ -1491,10 +1487,13 @@ const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', eff
       console.log('[ENCODE-DIAG]', JSON.stringify({
         outputFormat,
         quality,
+        grade: judgeResult?.grade || 'N/A',
         adaptiveEffort,
+        chronosState: chronos.state,
+        avgEncodeTime: Math.round(getAverageEncodeTime()),
         origW,
         origH,
-        aspectRatio: analysis.aspectRatio, // 🛑 ADD THIS LINE
+        aspectRatio: analysis.aspectRatio,
         targetWidth,
         targetHeight,
         bufferLength: outputBuffer?.length || 0,
