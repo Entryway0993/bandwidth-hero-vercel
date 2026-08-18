@@ -1,71 +1,68 @@
-// ============================================================
-// DIAGNOSTIC BUILD - Deploy this and check Vercel Function Logs
-// Each numbered log tells us exactly where the hang occurs.
-// ============================================================
+import 'dotenv/config';
+import express from 'express';
+import helmet from 'helmet';
+import authenticate from './src/authenticate.js';
+import params from './src/params.js';
+import proxy from './src/proxy.js';
 
-console.log('[DIAG-1] Module evaluation started');
-
-// Dynamic imports so we can see which one hangs
-let express, sharp, got;
-
-try {
-  console.log('[DIAG-2] Importing express...');
-  express = (await import('express')).default;
-  console.log('[DIAG-3] Express loaded');
-} catch (e) {
-  console.error('[DIAG-FAIL] Express import failed:', e.message);
-}
-
-try {
-  console.log('[DIAG-4] Importing sharp...');
-  sharp = (await import('sharp')).default;
-  console.log('[DIAG-5] Sharp loaded');
-} catch (e) {
-  console.error('[DIAG-FAIL] Sharp import failed:', e.message);
-}
-
-try {
-  console.log('[DIAG-6] Importing got...');
-  got = (await import('got')).default;
-  console.log('[DIAG-7] Got loaded');
-} catch (e) {
-  console.error('[DIAG-FAIL] Got import failed:', e.message);
-}
-
-console.log('[DIAG-8] Creating Express app...');
 const app = express();
 
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+app.use(helmet({
+  contentSecurityPolicy: false,
+  frameguard: { action: 'deny' },
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
+app.get('/healthz', (req, res) => res.status(200).json({ status: 'OK' }));
+
+// 🛑 SURGICAL TRACE MIDDLEWARE
+// We wrap every step in explicit logs to catch the exact line of death.
+
 app.use((req, res, next) => {
-  console.log('[DIAG-9] Request received:', req.method, req.url);
+  console.log('[TRACE-1] 🟢 Request hit Express');
   next();
 });
 
-app.get('/healthz', (req, res) => {
-  console.log('[DIAG-10] Health check hit');
-  res.json({ status: 'ok' });
-});
-
-app.get('/', (req, res) => {
-  console.log('[DIAG-11] Root handler hit');
-  res.json({
-    status: 'diagnostic-ok',
-    express: !!express,
-    sharp: !!sharp,
-    got: !!got,
-    url: req.url,
-    query: req.query
+app.use((req, res, next) => {
+  console.log('[TRACE-2] 🟡 Entering authenticate...');
+  authenticate(req, res, () => {
+    console.log('[TRACE-3] 🟢 authenticate passed');
+    next();
   });
 });
 
-// Catch-all
+app.use((req, res, next) => {
+  console.log('[TRACE-4] 🟡 Entering params...');
+  params(req, res, () => {
+    console.log('[TRACE-5] 🟢 params passed. Target URL:', req.opts?.url);
+    next();
+  });
+});
+
+app.use((req, res, next) => {
+  console.log('[TRACE-6] 🔴 Entering proxy... (If it hangs here, proxy.js is deadlocking)');
+  
+  // Force flush logs to Vercel console immediately
+  process.stdout.write('[TRACE-6-FLUSH] Forcing stdout flush\n');
+
+  proxy(req, res).then(() => {
+    console.log('[TRACE-7] 🟢 proxy resolved successfully');
+  }).catch(err => {
+    console.error('[TRACE-FATAL] proxy threw unhandled error:', err);
+    if (!res.headersSent) res.status(500).end();
+  });
+});
+
 app.use((req, res) => {
-  console.log('[DIAG-12] Catch-all hit:', req.method, req.url);
-  res.json({ status: 'catch-all', url: req.url });
+  console.log('[TRACE-8] ⚪ Catch-all 404');
+  res.status(404).json({ error: 'Endpoint not found' });
 });
 
 if (!process.env.VERCEL) {
-  app.listen(3000, () => console.log('[DIAG-13] Local server listening on 3000'));
+  app.listen(3000, () => console.log('Local dev listening'));
 }
 
-console.log('[DIAG-14] Module evaluation complete. Exporting app.');
 export default app;
