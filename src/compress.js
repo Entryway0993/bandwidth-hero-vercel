@@ -203,15 +203,16 @@ function getChronosState(pixelCount) {
   if (rollingEncodeTimes.length === 0) {
     const millions = pixelCount / 1_000_000;
     let effort = 9;
-    if (millions > 15) effort = 4;
-    else if (millions > 8) effort = 6;
+    if (millions > 8) effort = 4;        // 8MP+ : effort 4 (~55s) — 30% timeout risk
+    else if (millions > 4) effort = 5;   // 4-8MP: effort 5 (~25s) — safe
+    else if (millions > 2) effort = 7;   // 2-4MP: effort 7 (~10s) — safe
     return { state: 'COLD-START', effort };
   }
 
   const avg = getAverageEncodeTime();
 
   // 100% of 60s budget. 8 gradual effort levels (2→9).
-  const ENCODE_BUDGET_MS = 53000;
+  const ENCODE_BUDGET_MS = 60000;
   const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
 
   let effort;
@@ -1081,10 +1082,20 @@ export default async function compress(req, res, buffer) {
 
       const pixelCount = (metadata.width || 0) * (metadata.height || 0);
       const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState(pixelCount) : { state: 'COLD', effort: 9 };
-      
-      // 🛑 SURGICAL FIX: Removed maxSafeEffort ceiling. 
-      // Chronos now has full control to use the 60s budget as requested.
-      const adaptiveEffort = chronos.effort;
+  
+  // 🛑 SURGICAL FIX: Chronos can overshoot for large images.
+  // Clamp effort based on pixel count AFTER Chronos decides.
+  // This doesn't replace Chronos — it just prevents it from choosing
+  // an effort that will mathematically timeout for THIS image size.
+  const millions = pixelCount / 1_000_000;
+  let effortCeiling;
+  if (millions > 12)      effortCeiling = 3;
+  else if (millions > 8)  effortCeiling = 4;
+  else if (millions > 4)  effortCeiling = 6;
+  else if (millions > 2)  effortCeiling = 8;
+  else                    effortCeiling = 9;
+
+  const adaptiveEffort = Math.min(chronos.effort, effortCeiling);
 
       // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
       // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
