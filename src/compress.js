@@ -775,7 +775,9 @@ async function detectImageType(buffer, metadata) {
   const isGrayscale = colorVariance < 15;
   const isHighContrast = totalEntropy > 6.5;
   const isColorful = colorVariance > 80;
-  const aspectRatio = height / width;
+  // 🛑 SURGICAL FIX: stats() returns broken dimensions for tall strips.
+  // Use metadata dimensions which are verified correct.
+  const aspectRatio = (metadata.height || height) / (metadata.width || width);
 
   const isMangaStrip = aspectRatio > 2.5;
   const isMangaPage = aspectRatio > 1.2 && aspectRatio < 2.0 && isGrayscale;
