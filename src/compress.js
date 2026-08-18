@@ -1126,8 +1126,11 @@ export default async function compress(req, res, buffer) {
 
       pipeline = pipeline.toColourspace('srgb');
 
-      // 🛑 SURGICAL FIX #3: Respect req.opts.grayscale from params.js (the `bw` param).
-      if (FORCE_GRAYSCALE || req.opts?.grayscale || (analysis.isGrayscale && !analysis.isColorful)) {
+      // 🛑 SURGICAL FIX: bw=0 means the user EXPLICITLY wants color.
+      // Only auto-grayscale if the user hasn't disabled it.
+      const userExplicitlyWantsColor = req.opts?.grayscale === false;
+      const userExplicitlyWantsBW = req.opts?.grayscale === true;
+      if (FORCE_GRAYSCALE || userExplicitlyWantsBW || (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)) {
         pipeline = pipeline.grayscale();
       }
 
