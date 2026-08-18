@@ -199,20 +199,19 @@ function getAverageEncodeTime() {
 function getChronosState() {
   const avg = getAverageEncodeTime();
 
-  // 🛑 SURGICAL FIX: 100% of 60s budget. No overhead reservation.
-  // 8 gradual effort levels (2→9). User explicitly accepts timeout risk.
-  const ENCODE_BUDGET_MS = 60000;
-  const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
+  // 🛑 SURGICAL FIX: Full 100% of 53s budget. 8 gradual effort levels (2→9).
+  const ENCODE_BUDGET_MS = 53000;
+  const SEGMENT = ENCODE_BUDGET_MS / 8; // 6625ms per step
 
   let effort;
-  if      (avg > SEGMENT * 7) { effort = 2; }  // >52.5s — last resort
-  else if (avg > SEGMENT * 6) { effort = 3; }  // >45.0s
-  else if (avg > SEGMENT * 5) { effort = 4; }  // >37.5s
-  else if (avg > SEGMENT * 4) { effort = 5; }  // >30.0s
-  else if (avg > SEGMENT * 3) { effort = 6; }  // >22.5s
-  else if (avg > SEGMENT * 2) { effort = 7; }  // >15.0s
-  else if (avg > SEGMENT * 1) { effort = 8; }  // >7.5s
-  else                        { effort = 9; }  // <7.5s  — FULL MAX
+  if      (avg > SEGMENT * 7) { effort = 2; }  // >46.4s  — last resort before wall
+  else if (avg > SEGMENT * 6) { effort = 3; }  // >39.8s
+  else if (avg > SEGMENT * 5) { effort = 4; }  // >33.1s
+  else if (avg > SEGMENT * 4) { effort = 5; }  // >26.5s
+  else if (avg > SEGMENT * 3) { effort = 6; }  // >19.9s
+  else if (avg > SEGMENT * 2) { effort = 7; }  // >13.3s
+  else if (avg > SEGMENT * 1) { effort = 8; }  // >6.6s
+  else                        { effort = 9; }  // <6.6s   — FULL MAX
 
   const state =
     effort >= 9 ? 'COLD' :
@@ -228,7 +227,6 @@ function getChronosState() {
 
   return { state, effort };
 }
-
 // ============================================================
 // ENVIRONMENT TOGGLES
 // ============================================================
