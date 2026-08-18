@@ -1072,7 +1072,7 @@ export default async function compress(req, res, buffer) {
       // 🛑 SURGICAL FIX #2: Use req.opts.quality from params.js.
       // params.js reads `l`, `q`, and `quality` params and clamps them.
       // The old code only read `q` and `quality`, missing the `l` param entirely.
-      const baseQuality = req.opts?.quality ?? parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
+      const baseQuality = req.opts?.quality ?? (parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY);
       let quality = calculateQuality(analysis, baseQuality);
 
       if (judgeResult) {
