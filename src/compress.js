@@ -211,7 +211,7 @@ function getChronosState(pixelCount) {
   const avg = getAverageEncodeTime();
 
   // 100% of 60s budget. 8 gradual effort levels (2→9).
-  const ENCODE_BUDGET_MS = 55000;
+  const ENCODE_BUDGET_MS = 53000;
   const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
 
   let effort;
