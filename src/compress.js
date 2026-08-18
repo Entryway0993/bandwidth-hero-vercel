@@ -817,7 +817,6 @@ function getViewportMaxDim(req) {
 }
 
 function getChromaSubsampling(analysis) {
-  // 🛑 SURVIVAL PATCH: Kept from original audit. '4:0:0' and '4:2:2' throw fatal exceptions in sharp.
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
   return '4:2:0';
 }
@@ -1053,7 +1052,9 @@ export default async function compress(req, res, buffer) {
       const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
       const adaptiveEffort = chronos.effort;
 
-      const requestedFormat = req.query.f || req.query.format;
+      // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
+      // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
+      const requestedFormat = req.opts?.format || req.query.f || req.query.format;
       let outputFormat = 'jpeg';
 
       if (FORCE_JPEG) {
@@ -1062,34 +1063,16 @@ export default async function compress(req, res, buffer) {
         outputFormat = 'avif';
       } else if (requestedFormat === 'webp' && ENABLE_WEBP) {
         outputFormat = 'webp';
-      } else if (!requestedFormat) {
-        const accept = req.headers.accept || '';
-        const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
-        const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
-
-        if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
-          const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
-          let quality = calculateQuality(analysis, baseQuality);
-          if (judgeResult) {
-            quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
-          }
-
-          const duel = await formatDuel(buffer, quality);
-          outputFormat = duel.winner;
-          res.setHeader('X-Format-Duelist', `${duel.winner.toUpperCase()} (AVIF:${duel.avifSize} vs WebP:${duel.webpSize})`);
-          recordMetric('formatDuelist');
-        } else if (acceptsAvif) {
-          outputFormat = 'avif';
-        } else if (acceptsWebp) {
-          outputFormat = 'webp';
-        }
       } else if (requestedFormat === 'jpeg' || requestedFormat === 'jpg') {
         outputFormat = 'jpeg';
       } else if (requestedFormat === 'png') {
         outputFormat = 'png';
       }
 
-      const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
+      // 🛑 SURGICAL FIX #2: Use req.opts.quality from params.js.
+      // params.js reads `l`, `q`, and `quality` params and clamps them.
+      // The old code only read `q` and `quality`, missing the `l` param entirely.
+      const baseQuality = req.opts?.quality ?? parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
       let quality = calculateQuality(analysis, baseQuality);
 
       if (judgeResult) {
@@ -1128,7 +1111,7 @@ export default async function compress(req, res, buffer) {
 
       let pipeline = sharp(buffer, {
         animated: isAnimated,
-        limitInputPixels: 268402689, // 🛑 REVERTED: Original massive limit restored.
+        limitInputPixels: 268402689,
       });
 
       if (ENABLE_METADATA_REAPER) {
@@ -1142,7 +1125,8 @@ export default async function compress(req, res, buffer) {
 
       pipeline = pipeline.toColourspace('srgb');
 
-      if (FORCE_GRAYSCALE || (analysis.isGrayscale && !analysis.isColorful)) {
+      // 🛑 SURGICAL FIX #3: Respect req.opts.grayscale from params.js (the `bw` param).
+      if (FORCE_GRAYSCALE || req.opts?.grayscale || (analysis.isGrayscale && !analysis.isColorful)) {
         pipeline = pipeline.grayscale();
       }
 
@@ -1195,13 +1179,18 @@ export default async function compress(req, res, buffer) {
 
       const { width: origW, height: origH } = metadata;
 
+      // 🛑 SURGICAL FIX #4 & #5: Use req.opts.maxDim and req.opts.maxStripWidth from params.js.
+      // params.js handles mode presets (manga/strip/photo/raw) and Save-Data throttling.
+      const effectiveStripWidth = (req.opts?.maxStripWidth > 0) ? req.opts.maxStripWidth : MAX_STRIP_WIDTH;
+      const effectiveMaxDim = (req.opts?.maxDim > 0) ? req.opts.maxDim : viewportMaxDim;
+
       if (analysis.isMangaStrip) {
-        if (origW > MAX_STRIP_WIDTH) {
-          targetWidth = MAX_STRIP_WIDTH;
+        if (effectiveStripWidth > 0 && origW > effectiveStripWidth) {
+          targetWidth = effectiveStripWidth;
         }
       } else {
-        if (origW > viewportMaxDim || origH > viewportMaxDim) {
-          const scale = Math.min(viewportMaxDim / origW, viewportMaxDim / origH);
+        if (effectiveMaxDim > 0 && (origW > effectiveMaxDim || origH > effectiveMaxDim)) {
+          const scale = Math.min(effectiveMaxDim / origW, effectiveMaxDim / origH);
           targetWidth = Math.round(origW * scale);
           targetHeight = Math.round(origH * scale);
         }
@@ -1352,7 +1341,7 @@ export default async function compress(req, res, buffer) {
         await new Promise((resolve, reject) => {
           passthrough.on('finish', resolve);
           passthrough.on('error', reject);
-          passthrough.on('close', resolve); // 🛑 SURVIVAL PATCH: Kept to prevent hanging on client disconnect.
+          passthrough.on('close', resolve);
           pipeline.on('error', reject);
         });
 
@@ -1571,7 +1560,6 @@ export default async function compress(req, res, buffer) {
       metrics.encodingFailures++;
       metrics.totalBytesOut += buffer.length;
     }
-    // 🛑 SURVIVAL PATCH: Kept to prevent the Vercel dangling socket 504 timeout.
     if (!res.headersSent && !res.writableEnded) {
       res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
       res.end(buffer); 
@@ -1582,4 +1570,4 @@ export default async function compress(req, res, buffer) {
   } finally {
     activeRequests--;
   }
-                      }
+               }
