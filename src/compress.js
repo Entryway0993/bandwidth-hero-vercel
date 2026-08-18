@@ -771,14 +771,18 @@ export default async function compress(req, res, buffer) {
   const abortController = new AbortController();
   const { signal } = abortController;
 
-  // 🛑 SURGICAL FIX: Hard Timeout Guard.
-  // Abort processing 5 seconds before Vercel's 60s guillotine to prevent 504s.
-  const HARD_TIMEOUT_MS = 55000;
+  // 🛑 SURGICAL FIX: Hard Timeout Guard reduced to 40s.
+  // Provides 20s buffer to gracefully exit before Vercel's 60s guillotine.
+  const HARD_TIMEOUT_MS = 40000;
   const hardTimeout = setTimeout(() => {
     abortController.abort();
   }, HARD_TIMEOUT_MS);
 
   let clientDisconnected = false;
+
+  // 🛑 SURGICAL FIX: FAST MODE for large images.
+  // Images > 5MB bypass heavy analysis to prevent CPU starvation and 60s timeouts.
+  const IS_LARGE_IMAGE = buffer.length > 5 * 1024 * 1024;
 
   if (ENABLE_TIMEOUT_GUILLOTINE) {
     req.on('close', () => {
@@ -837,7 +841,8 @@ export default async function compress(req, res, buffer) {
     }
 
     let thumbResult = null;
-    if (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) {
+    // 🛑 SURGICAL FIX: Skip placeholder generation for large images to save CPU.
+    if (!IS_LARGE_IMAGE && (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER)) {
       thumbResult = await generatePlaceholderAndPalette(buffer);
 
       if (ENABLE_VOID_WATCHER && thumbResult.isVoid) {
@@ -905,7 +910,28 @@ export default async function compress(req, res, buffer) {
     }
 
     try {
-      const analysis = await detectImageType(buffer, metadata);
+      // 🛑 SURGICAL FIX: FAST MODE analysis bypass for large images.
+      let analysis;
+      if (IS_LARGE_IMAGE) {
+        res.setHeader('X-Fast-Mode', 'ACTIVE');
+        analysis = {
+          isGrayscale: false,
+          isHighContrast: false,
+          isColorful: false,
+          isMangaStrip: false,
+          isMangaPage: false,
+          isAnime: false,
+          entropy: 5,
+          sharpness: 50,
+          colorVariance: 0,
+          aspectRatio: (metadata.height || 1) / (metadata.width || 1),
+          meanLuminance: 128,
+          stdevLuminance: 50,
+          maxLuminance: 255,
+        };
+      } else {
+        analysis = await detectImageType(buffer, metadata);
+      }
       
       if (signal.aborted) {
         res.setHeader('X-Timeout-Guillotine', 'ABORTED');
@@ -922,7 +948,8 @@ export default async function compress(req, res, buffer) {
       }
 
       let skewAngle = 0;
-      if (ENABLE_DESKEW && !analysis.isMangaStrip) {
+      // 🛑 SURGICAL FIX: Skip deskew for large images.
+      if (!IS_LARGE_IMAGE && ENABLE_DESKEW && !analysis.isMangaStrip) {
         skewAngle = await detectSkew(buffer);
         if (skewAngle !== 0) {
           res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
@@ -942,7 +969,8 @@ export default async function compress(req, res, buffer) {
       }
 
       let halftoneResult = null;
-      if (ENABLE_MOIRE) {
+      // 🛑 SURGICAL FIX: Skip halftone detection for large images.
+      if (!IS_LARGE_IMAGE && ENABLE_MOIRE) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
 
@@ -953,7 +981,8 @@ export default async function compress(req, res, buffer) {
       }
 
       let lineArtResult = null;
-      if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
+      // 🛑 SURGICAL FIX: Skip line art detection for large images.
+      if (!IS_LARGE_IMAGE && (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN)) {
         lineArtResult = await detectLineArt(buffer, analysis);
       }
 
@@ -965,7 +994,8 @@ export default async function compress(req, res, buffer) {
 
       let alphaStrippable = false;
       const isAnimated = metadata.pages > 1;
-      if (ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
+      // 🛑 SURGICAL FIX: Skip alpha detection for large images.
+      if (!IS_LARGE_IMAGE && ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
         alphaStrippable = await detectAlphaStrippable(buffer, metadata);
         if (alphaStrippable) {
           res.setHeader('X-Alpha-Sentinel', 'STRIPPED');
@@ -980,7 +1010,8 @@ export default async function compress(req, res, buffer) {
       }
 
       const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState() : { state: 'COLD', effort: 4 };
-      const adaptiveEffort = chronos.effort;
+      // 🛑 SURGICAL FIX: Force effort 1 for large images to minimize encode CPU time.
+      const adaptiveEffort = IS_LARGE_IMAGE ? 1 : chronos.effort;
 
       const requestedFormat = req.query.f || req.query.format;
       let outputFormat = 'jpeg';
@@ -996,7 +1027,8 @@ export default async function compress(req, res, buffer) {
         const acceptsAvif = ENABLE_AVIF && accept.includes('image/avif');
         const acceptsWebp = ENABLE_WEBP && accept.includes('image/webp');
 
-        if (ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
+        // 🛑 SURGICAL FIX: Skip format duel for large images to save CPU.
+        if (!IS_LARGE_IMAGE && ENABLE_FORMAT_DUELIST && acceptsAvif && acceptsWebp && !isAnimated) {
           const baseQuality = parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY;
           let quality = calculateQuality(analysis, baseQuality);
           if (judgeResult) {
@@ -1512,4 +1544,4 @@ export default async function compress(req, res, buffer) {
     clearTimeout(hardTimeout);
     activeRequests--;
   }
-                 }
+    }
