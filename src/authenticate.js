@@ -2,14 +2,11 @@ import crypto from 'node:crypto';
 
 const { LOGIN, PASSWORD, API_KEY } = process.env;
 
-// 🛑 SURGICAL FIX: Native Basic Auth Parser (Zero Dependencies)
-// Replaces the broken 'basic-auth' npm package to prevent ESM/CJS crashes.
 function parseBasicAuth(req) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Basic ')) return undefined;
   
   try {
-    // Decode the Base64 string after "Basic "
     const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
     const colonIndex = decoded.indexOf(':');
     
@@ -20,18 +17,14 @@ function parseBasicAuth(req) {
       pass: decoded.slice(colonIndex + 1)
     };
   } catch {
-    return undefined; // Invalid Base64
+    return undefined;
   }
 }
 
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  
-  // 🛑 SURGICAL FIX: Hash both inputs to eliminate length-based timing leaks.
-  // SHA-256 ensures both buffers are exactly 32 bytes before comparison.
   const hashA = crypto.createHash('sha256').update(a).digest();
   const hashB = crypto.createHash('sha256').update(b).digest();
-  
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
@@ -49,12 +42,20 @@ export default function authenticate(req, res, next) {
     return next();
   }
   
-  // 🛑 SURGICAL FIX: Query String API Key EXCISED.
-  // Passing secrets in URLs guarantees leakage in Vercel logs,
-  // Cloudflare telemetry, and browser history.
-  // Clients MUST use the x-api-key HTTP header.
+  // 2. Check Query String API Key (Required for client compatibility)
+  // ⚠️ SECURITY NOTE: Query string keys leak into URLs/logs.
+  // Mitigated by: Morgan skip logic in server.js + telemetry stripping in worker.js
+  let queryKey = req.query.api || req.query.apikey || req.query.api_key;
   
-  // 2. Check Basic Auth (Using our native parser)
+  if (typeof queryKey === 'string') {
+    queryKey = queryKey.split(/[\/\?]/)[0].trim();
+  }
+  
+  if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
+    return next();
+  }
+  
+  // 3. Check Basic Auth
   if (LOGIN && PASSWORD) {
     const credentials = parseBasicAuth(req);
     if (
@@ -66,7 +67,7 @@ export default function authenticate(req, res, next) {
     }
   }
   
-  // 3. Fallback: Deny access
+  // 4. Fallback: Deny access
   if (LOGIN && PASSWORD) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Bandwidth-Hero Compression Service"');
   }
