@@ -873,7 +873,7 @@ export default async function compress(req, res, buffer) {
 
     if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
-      const MAX_ASPECT_RATIO = 50;
+      const MAX_ASPECT_RATIO = 200; // Raised from 50 to accommodate webtoon strips
 
       const width = metadata.width || 0;
       const height = metadata.height || 0;
@@ -888,6 +888,7 @@ export default async function compress(req, res, buffer) {
       const maxDim = Math.max(width, height);
       const aspectRatio = maxDim / minDim;
 
+      // Only reject truly absurd ratios (>200:1). Vertical strips are valid.
       if (aspectRatio > MAX_ASPECT_RATIO) {
         res.status(413);
         res.setHeader('X-Dimension-Overlord', 'REJECTED_ASPECT');
