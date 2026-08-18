@@ -740,9 +740,10 @@ function getViewportMaxDim(req) {
 }
 
 function getChromaSubsampling(analysis) {
-  if (analysis.isGrayscale) return '4:0:0';
+  // 🛑 SURGICAL FIX: Sharp only accepts '4:4:4' or '4:2:0' for JPEG, WebP, and AVIF.
+  // '4:0:0' and '4:2:2' will throw fatal exceptions and crash the pipeline.
+  // Grayscale images do not contain chroma data, so '4:2:0' is perfectly safe.
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
-  if (analysis.isAnime) return '4:2:2';
   return '4:2:0';
 }
 
@@ -1452,22 +1453,29 @@ export default async function compress(req, res, buffer) {
 
   } catch (err) {
     if (clientDisconnected || signal.aborted) {
-      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-      return Buffer.alloc(0);
+      if (!res.headersSent) res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      if (!res.writableEnded) res.end();
+      return null;
     }
     console.error('[COMPRESS ERROR]', err.message);
-    res.setHeader('X-Compression', 'FAILED');
+    
     if (ENABLE_ORACLE_LEDGER) {
       metrics.encodingFailures++;
       metrics.totalBytesOut += buffer.length;
     }
-    // 🛑 SURGICAL FIX: Prevent ERR_STREAM_WRITE_AFTER_END crash.
-    // If stream was already piped to res, do NOT return buffer.
+
+    // 🛑 SURGICAL FIX: Prevent Vercel 60s Timeout & ERR_STREAM_WRITE_AFTER_END.
+    // If headers aren't sent, send the fallback buffer and CLOSE the response.
     if (!res.headersSent && !res.writableEnded) {
-      return buffer;
+      res.setHeader('X-Compression', 'FAILED');
+      res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
+      res.end(buffer); 
+    } else if (!res.writableEnded) {
+      // If headers were sent (streaming started) but it failed, just kill the stream.
+      res.end(); 
     }
     return null;
   } finally {
     activeRequests--;
   }
-}
+        }
