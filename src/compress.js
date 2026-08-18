@@ -1089,9 +1089,9 @@ export default async function compress(req, res, buffer) {
   // an effort that will mathematically timeout for THIS image size.
   const millions = pixelCount / 1_000_000;
   let effortCeiling;
-  if (millions > 12)      effortCeiling = 3;
-  else if (millions > 8)  effortCeiling = 5;
-  else if (millions > 4)  effortCeiling = 6;
+  if (millions > 12)      effortCeiling = 5;
+  else if (millions > 8)  effortCeiling = 6;
+  else if (millions > 4)  effortCeiling = 7;
   else if (millions > 2)  effortCeiling = 8;
   else                    effortCeiling = 9;
 
