@@ -155,9 +155,6 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 const perceptualCache = new Map();
 const PERCEPTUAL_CACHE_MAX = 500;
 
-const lorekeeperCache = new Map();
-const LOREKEEPER_CACHE_MAX = 200;
-
 // ============================================================
 // FEATURE: THE SEMAPHORE WARDEN (Concurrency Control)
 // ============================================================
@@ -234,7 +231,6 @@ const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
 const ENABLE_LUMINANCE = envBool('ENABLE_LUMINANCE', true);
 const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
 const ENABLE_DESKEW = envBool('ENABLE_DESKEW', true);
-const ENABLE_LOREKEEPER = envBool('ENABLE_LOREKEEPER', true);
 const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
 const ENABLE_DITHER_ASSASSIN = envBool('ENABLE_DITHER_ASSASSIN', true);
 const ENABLE_BANDING_EXORCIST = envBool('ENABLE_BANDING_EXORCIST', true);
@@ -403,80 +399,6 @@ async function detectSkew(buffer) {
   } catch {
     return 0;
   }
-}
-
-function generateLoreHash(buffer) {
-  return createHash('md5').update(buffer).digest('hex').slice(0, 8);
-}
-
-async function readLoreSignature(buffer) {
-  try {
-    const { data, info } = await sharp(buffer)
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const channels = info.channels;
-    if (channels < 3) return null;
-
-    const blueIdx = 2;
-    let hashStr = '';
-    const maxPixels = Math.min(32, Math.floor(data.length / channels));
-
-    for (let i = 0; i < maxPixels; i++) {
-      hashStr += (data[i * channels + blueIdx] & 1).toString();
-    }
-
-    if (hashStr.length < 32) return null;
-
-    const hashInt = parseInt(hashStr, 2);
-    return hashInt.toString(16).padStart(8, '0');
-  } catch {
-    return null;
-  }
-}
-
-async function embedLoreSignature(buffer, loreHash) {
-  try {
-    const { data, info } = await sharp(buffer)
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const channels = info.channels;
-    if (channels < 3) return buffer;
-
-    const blueIdx = 2;
-    const hashInt = parseInt(loreHash, 16);
-    const hashBits = hashInt.toString(2).padStart(32, '0');
-
-    const maxPixels = Math.min(32, Math.floor(data.length / channels));
-
-    for (let i = 0; i < maxPixels; i++) {
-      const idx = i * channels + blueIdx;
-      data[idx] = (data[idx] & 0xFE) | parseInt(hashBits[i], 10);
-    }
-
-    const outputBuffer = await sharp(data, {
-      raw: { width: info.width, height: info.height, channels: channels },
-    }).png().toBuffer();
-
-    return outputBuffer;
-  } catch {
-    return buffer;
-  }
-}
-
-function checkLoreCache(hash) {
-  if (!hash) return null;
-  return lorekeeperCache.get(hash) || null;
-}
-
-function setLoreCache(hash, result) {
-  if (!hash) return;
-  if (lorekeeperCache.size >= LOREKEEPER_CACHE_MAX) {
-    const firstKey = lorekeeperCache.keys().next().value;
-    lorekeeperCache.delete(firstKey);
-  }
-  lorekeeperCache.set(hash, result);
 }
 
 // 🛑 SURGICAL FIX: Cache the noise tile in the V8 isolate to prevent per-request CPU/GC churn.
@@ -927,30 +849,6 @@ export default async function compress(req, res, buffer) {
       return Buffer.alloc(0);
     }
 
-    let loreHash = null;
-    let loreHit = false;
-    if (ENABLE_LOREKEEPER && format === 'png') {
-      loreHash = await readLoreSignature(buffer);
-      if (loreHash) {
-        const loreCached = checkLoreCache(loreHash);
-        if (loreCached) {
-          loreHit = true;
-          res.setHeader('X-Lorekeeper', 'HIT');
-          res.setHeader('Content-Type', loreCached.contentType);
-          if (loreCached.placeholder) res.setHeader('X-Placeholder', loreCached.placeholder);
-          if (loreCached.grade) res.setHeader('X-Quality-Grade', loreCached.grade);
-          if (loreCached.palette && loreCached.palette.length > 0) {
-            res.setHeader('X-Palette', loreCached.palette.join(','));
-          }
-          if (ENABLE_ORACLE_LEDGER) {
-            metrics.totalBytesOut += loreCached.buffer.length;
-            metrics.totalBytesSaved += buffer.length - loreCached.buffer.length;
-          }
-          return loreCached.buffer;
-        }
-      }
-    }
-
     const pHash = await generatePerceptualHash(buffer);
     const cachedResult = checkPerceptualCache(pHash);
 
@@ -1133,7 +1031,9 @@ export default async function compress(req, res, buffer) {
 
       let pipeline = sharp(buffer, {
         animated: isAnimated,
-        limitInputPixels: 268402689,
+        // 🛑 SURGICAL FIX: Reduced from 268402689 to 60000000.
+        // 268M pixels = 1GB+ RAM per decode. 60M = ~240MB, safe for serverless.
+        limitInputPixels: 60000000,
       });
 
       if (ENABLE_METADATA_REAPER) {
@@ -1283,7 +1183,6 @@ export default async function compress(req, res, buffer) {
       const encodeStart = Date.now();
 
       const needsBuffer = ENABLE_ENCODING_VERIFIER ||
-                          ENABLE_LOREKEEPER ||
                           ditherAssassinActive ||
                           (outputFormat === 'png' && !ENABLE_PROGRESSIVE_PNG);
 
@@ -1516,20 +1415,6 @@ export default async function compress(req, res, buffer) {
         res.setHeader('X-Bytes-Saved', `${(bytesSaved / 1024).toFixed(1)}KB`);
       }
 
-      if (ENABLE_LOREKEEPER && outputFormat === 'png' && !loreHit && !ditherAssassinActive) {
-        const newLoreHash = generateLoreHash(buffer);
-        outputBuffer = await embedLoreSignature(outputBuffer, newLoreHash);
-        setLoreCache(newLoreHash, {
-          buffer: outputBuffer,
-          contentType: contentType,
-          placeholder: placeholder,
-          grade: judgeResult ? judgeResult.grade : null,
-          palette: palette,
-        });
-        res.setHeader('X-Lorekeeper', 'EMBEDDED');
-        recordMetric('lorekeeper');
-      }
-
       setPerceptualCache(pHash, {
         buffer: outputBuffer,
         contentType: contentType,
@@ -1576,7 +1461,12 @@ export default async function compress(req, res, buffer) {
       metrics.encodingFailures++;
       metrics.totalBytesOut += buffer.length;
     }
-    return buffer;
+    // 🛑 SURGICAL FIX: Prevent ERR_STREAM_WRITE_AFTER_END crash.
+    // If stream was already piped to res, do NOT return buffer.
+    if (!res.headersSent && !res.writableEnded) {
+      return buffer;
+    }
+    return null;
   } finally {
     activeRequests--;
   }
