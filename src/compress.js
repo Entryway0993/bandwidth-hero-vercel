@@ -229,14 +229,6 @@ function getChronosState() {
   return { state, effort };
 }
 
-  metrics.chronosStateHistory.push({ state, effort, avg: Math.round(avg), time: Date.now() });
-  if (metrics.chronosStateHistory.length > 100) {
-    metrics.chronosStateHistory.shift();
-  }
-
-  return { state, effort };
-}
-
 // ============================================================
 // ENVIRONMENT TOGGLES
 // ============================================================
