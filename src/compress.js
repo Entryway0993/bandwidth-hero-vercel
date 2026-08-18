@@ -771,6 +771,13 @@ export default async function compress(req, res, buffer) {
   const abortController = new AbortController();
   const { signal } = abortController;
 
+  // 🛑 SURGICAL FIX: Hard Timeout Guard.
+  // Abort processing 5 seconds before Vercel's 60s guillotine to prevent 504s.
+  const HARD_TIMEOUT_MS = 55000;
+  const hardTimeout = setTimeout(() => {
+    abortController.abort();
+  }, HARD_TIMEOUT_MS);
+
   let clientDisconnected = false;
 
   if (ENABLE_TIMEOUT_GUILLOTINE) {
@@ -899,6 +906,12 @@ export default async function compress(req, res, buffer) {
 
     try {
       const analysis = await detectImageType(buffer, metadata);
+      
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        return Buffer.alloc(0);
+      }
+
       const viewportMaxDim = getViewportMaxDim(req);
 
       let placeholder = thumbResult ? thumbResult.placeholder : null;
@@ -933,9 +946,21 @@ export default async function compress(req, res, buffer) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
 
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
+      }
+
       let lineArtResult = null;
       if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
         lineArtResult = await detectLineArt(buffer, analysis);
+      }
+
+      if (signal.aborted) {
+        res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+        res.status(499);
+        return Buffer.alloc(0);
       }
 
       let alphaStrippable = false;
@@ -979,6 +1004,12 @@ export default async function compress(req, res, buffer) {
           }
 
           const duel = await formatDuel(buffer, quality);
+          
+          if (signal.aborted) {
+            res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+            return Buffer.alloc(0);
+          }
+
           outputFormat = duel.winner;
           res.setHeader('X-Format-Duelist', `${duel.winner.toUpperCase()} (AVIF:${duel.avifSize} vs WebP:${duel.webpSize})`);
           recordMetric('formatDuelist');
@@ -1257,6 +1288,8 @@ export default async function compress(req, res, buffer) {
         await new Promise((resolve, reject) => {
           passthrough.on('finish', resolve);
           passthrough.on('error', reject);
+          // 🛑 SURGICAL FIX: Resolve on 'close' to prevent hanging when client disconnects.
+          passthrough.on('close', resolve);
           pipeline.on('error', reject);
         });
 
@@ -1476,6 +1509,7 @@ export default async function compress(req, res, buffer) {
     }
     return null;
   } finally {
+    clearTimeout(hardTimeout);
     activeRequests--;
   }
-        }
+                 }
