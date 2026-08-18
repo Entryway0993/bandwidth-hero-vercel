@@ -152,7 +152,6 @@ export default async function proxy(req, res) {
   let isAborted = false;
 
   // 🛑 SURGICAL FIX: Hard Timeout Guard for the entire proxy function.
-  // Aborts 10s before Vercel's 60s guillotine to prevent 504s.
   const PROXY_HARD_TIMEOUT_MS = 50000;
   const proxyHardTimeout = setTimeout(() => {
     isAborted = true;
@@ -214,7 +213,6 @@ export default async function proxy(req, res) {
       ...(finalReferer ? { referer: finalReferer } : {})
     };
 
-    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (Check vault, add conditional headers)
     const vaultEntry = vaultGet(targetUrl);
     if (vaultEntry) {
       if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
@@ -254,8 +252,6 @@ export default async function proxy(req, res) {
     let fetchConfig = config;
     let isWorkerFetch = false;
 
-    // 🛑 SURGICAL FIX: Use a shorter timeout for the CF Worker fetch.
-    // If the worker is slow, we need to fail fast and fall back to direct fetch.
     const WORKER_REQUEST_TIMEOUT_MS = 10000;
 
     if (workerBase && workerBase.startsWith('https://')) {
@@ -321,7 +317,6 @@ export default async function proxy(req, res) {
 
     let rawBody;
 
-    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (304 Handling)
     if (statusCode === 304 && vaultEntry) {
       rawBody = vaultEntry.raw;
       res.setHeader('X-Conditional-Fetch', '304_VAULT_HIT');
@@ -333,7 +328,6 @@ export default async function proxy(req, res) {
       return sendGhost(res, 3600);
     }
 
-    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (Store in vault on 200)
     if (statusCode === 200 && rawBody.length <= RAW_VAULT_MAX_ENTRY) {
       const upstreamEtag = responseHeaders['etag'] || null;
       const upstreamLastModified = responseHeaders['last-modified'] || null;
@@ -359,7 +353,6 @@ export default async function proxy(req, res) {
       return sendGhost(res, 3600);
     }
 
-    // 🛑 THE UPSTREAM CONDITIONAL FETCHER (Do not reject 304)
     if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) {
       return sendGhost(res, 60);
     }
@@ -405,8 +398,6 @@ export default async function proxy(req, res) {
     res.setHeader('x-upstream-content-length', String(rawBody.length));
 
     res.setHeader('ETag', etag);
-    // 🛑 SURGICAL FIX: Changed from 'private' to 'public' to enable CDN caching.
-    // Added Vary header to prevent cache poisoning across AVIF/WebP/JPEG formats.
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
     res.setHeader('Vary', 'Accept, Accept-Encoding, Sec-CH-Save-Data');
 
@@ -420,7 +411,17 @@ export default async function proxy(req, res) {
     }
 
     if (shouldCompress(req, rawBody)) {
-      await compress(req, res, rawBody);
+      const compressedResult = await compress(req, res, rawBody);
+      
+      // 🛑 SURGICAL FIX: compress.js returns a Buffer in buffer mode but doesn't call res.end().
+      // We MUST close the HTTP response here to prevent the Vercel 60s timeout.
+      if (!res.writableEnded) {
+        if (compressedResult && compressedResult.length > 0) {
+          res.end(compressedResult);
+        } else {
+          res.end();
+        }
+      }
       return;
     }
 
