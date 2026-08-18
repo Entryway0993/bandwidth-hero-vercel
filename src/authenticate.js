@@ -49,19 +49,12 @@ export default function authenticate(req, res, next) {
     return next();
   }
   
-  // 2. Check Query String API Key (The Nuclear Lobotomy for your phone app)
-  let queryKey = req.query.api || req.query.apikey || req.query.api_key;
+  // 🛑 SURGICAL FIX: Query String API Key EXCISED.
+  // Passing secrets in URLs guarantees leakage in Vercel logs,
+  // Cloudflare telemetry, and browser history.
+  // Clients MUST use the x-api-key HTTP header.
   
-  // 🛑 SURGICAL FIX: Chop off ANY garbage the dumb app attaches.
-  if (typeof queryKey === 'string') {
-    queryKey = queryKey.split(/[\/\?]/)[0].trim();
-  }
-  
-  if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
-    return next();
-  }
-  
-  // 3. Check Basic Auth (Using our native parser)
+  // 2. Check Basic Auth (Using our native parser)
   if (LOGIN && PASSWORD) {
     const credentials = parseBasicAuth(req);
     if (
@@ -73,7 +66,7 @@ export default function authenticate(req, res, next) {
     }
   }
   
-  // 4. Fallback: Deny access
+  // 3. Fallback: Deny access
   if (LOGIN && PASSWORD) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Bandwidth-Hero Compression Service"');
   }
