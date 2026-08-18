@@ -392,7 +392,10 @@ export default async function proxy(req, res) {
     res.setHeader('x-upstream-content-length', String(rawBody.length));
 
     res.setHeader('ETag', etag);
-    res.setHeader('Cache-Control', 'private, max-age=86400');
+    // 🛑 SURGICAL FIX: Changed from 'private' to 'public' to enable CDN caching.
+    // Added Vary header to prevent cache poisoning across AVIF/WebP/JPEG formats.
+    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+    res.setHeader('Vary', 'Accept, Accept-Encoding, Sec-CH-Save-Data');
 
     req.opts.originType = detectedType;
 
@@ -432,4 +435,4 @@ export default async function proxy(req, res) {
 
     return sendGhost(res, 60);
   }
-}
+    }
