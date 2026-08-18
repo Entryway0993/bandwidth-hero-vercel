@@ -777,7 +777,7 @@ async function detectImageType(buffer, metadata) {
   const isColorful = colorVariance > 80;
   const aspectRatio = height / width;
 
-  const isMangaStrip = aspectRatio > 2.5 && isGrayscale;
+  const isMangaStrip = aspectRatio > 2.5;
   const isMangaPage = aspectRatio > 1.2 && aspectRatio < 2.0 && isGrayscale;
   const isAnime = isColorful && totalSharpness > 100;
 
