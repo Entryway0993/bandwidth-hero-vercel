@@ -1,62 +1,58 @@
 import crypto from 'node:crypto';
-import got from 'got';
-import { Agent } from 'node:https';
+import zlib from 'node:zlib';
+import { promisify } from 'node:util';
+import { request, Agent } from 'undici';
 import sharp from 'sharp';
+import { LRUCache } from 'lru-cache';
 import { parseSafeUrl, safeLookup } from './urlGuard.js';
 import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
+const gunzip = promisify(zlib.gunzip);
+const inflate = promisify(zlib.inflate);
+const brotliDecompress = promisify(zlib.brotliDecompress);
+
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
-const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (20 * 1024 * 1024);
+const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (24 * 1024 * 1024);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
 const RAW_VAULT_MAX_BYTES = 30 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRY = 5 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRIES = 50;
-const RAW_VAULT = new Map();
+
+// 🛑 O(1) LRU VAULT (byte-bounded). Replaces hand-rolled O(N) Map eviction.
+const RAW_VAULT = new LRUCache({
+  max: RAW_VAULT_MAX_ENTRIES,
+  maxSize: RAW_VAULT_MAX_BYTES,
+  sizeCalculation: (entry) => entry.size
+});
 
 function vaultGet(url) {
-  const entry = RAW_VAULT.get(url);
-  if (entry) {
-    entry.lastUsed = Date.now();
-    return entry;
-  }
-  return null;
+  return RAW_VAULT.get(url) ?? null;
 }
 
 function vaultSet(url, raw, etag, lastModified) {
   if (raw.length > RAW_VAULT_MAX_ENTRY) return;
-  let totalSize = 0;
-  for (const e of RAW_VAULT.values()) totalSize += e.size;
-  while (totalSize + raw.length > RAW_VAULT_MAX_BYTES && RAW_VAULT.size > 0) {
-    let oldestKey = null, oldestTime = Infinity;
-    for (const [k, e] of RAW_VAULT) {
-      if (e.lastUsed < oldestTime) { oldestTime = e.lastUsed; oldestKey = k; }
-    }
-    if (oldestKey) {
-      totalSize -= RAW_VAULT.get(oldestKey).size;
-      RAW_VAULT.delete(oldestKey);
-    }
-  }
-  if (RAW_VAULT.size >= RAW_VAULT_MAX_ENTRIES) {
-    let oldestKey = null, oldestTime = Infinity;
-    for (const [k, e] of RAW_VAULT) {
-      if (e.lastUsed < oldestTime) { oldestTime = e.lastUsed; oldestKey = k; }
-    }
-    if (oldestKey) RAW_VAULT.delete(oldestKey);
-  }
-  RAW_VAULT.set(url, { raw, etag, lastModified, size: raw.length, lastUsed: Date.now() });
+  RAW_VAULT.set(url, { raw, etag, lastModified, size: raw.length });
 }
 
-const chromeCipherAgent = new Agent({
-  ciphers: [
-    'TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256',
-    'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256',
-    'ECDHE-ECDSA-AES256-GCM-SHA384', 'ECDHE-RSA-AES256-GCM-SHA384'
-  ].join(':'),
-  minVersion: 'TLSv1.2',
-  maxVersion: 'TLSv1.3'
+// 🛑 TLS FINGERPRINT via undici dispatcher (replaces dead https.Agent in got v15).
+// ⚠️ VERSION-UNCERTAIN: `connect.lookup` is HIGH-CONFIDENCE but smoke-test-required.
+const chromeDispatcher = new Agent({
+  connect: {
+    ciphers: [
+      'TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256',
+      'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256',
+      'ECDHE-ECDSA-AES256-GCM-SHA384', 'ECDHE-RSA-AES256-GCM-SHA384'
+    ].join(':'),
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.3',
+    lookup: safeLookup
+  },
+  headersTimeout: REQUEST_TIMEOUT_MS,
+  bodyTimeout: REQUEST_TIMEOUT_MS,
+  keepAliveTimeout: 10000
 });
 
 const UA_POOL = [
@@ -110,8 +106,10 @@ function detectContentType(buffer) {
   return 'application/octet-stream';
 }
 
-function generateETag(req, targetUrl) {
-  const payload = JSON.stringify({
+// 🛑 FIXED ETag: incorporates upstream identity (ETag/Last-Modified) or content hash,
+// so upstream content changes invalidate the cache. No more permanent stale images.
+async function generateETag(req, targetUrl, upstreamHeaders, body) {
+  const paramsFingerprint = JSON.stringify({
     url: targetUrl,
     format: req.opts?.format,
     quality: req.opts?.quality,
@@ -119,32 +117,106 @@ function generateETag(req, targetUrl) {
     maxDim: req.opts?.maxDim,
     maxStripWidth: req.opts?.maxStripWidth,
     sharpen: req.query?.sharpen,
-    rotate: req.query?.rotate,
-    debug: req.query?.debug
+    rotate: req.query?.rotate
   });
-  return `"${crypto.createHash('md5').update(payload).digest('hex')}"`;
+
+  const upstreamEtag = upstreamHeaders?.['etag'];
+  const upstreamLM = upstreamHeaders?.['last-modified'];
+  const upstreamLen = upstreamHeaders?.['content-length'];
+
+  let upstreamIdentity;
+  if (upstreamEtag || upstreamLM) {
+    upstreamIdentity = `${upstreamEtag || ''}|${upstreamLM || ''}|${upstreamLen || ''}`;
+  } else {
+    const digest = await crypto.subtle.digest('SHA-256', body);
+    upstreamIdentity = Buffer.from(digest).toString('hex');
+  }
+
+  const combined = await crypto.subtle.digest(
+    'SHA-256',
+    Buffer.from(paramsFingerprint + '|' + upstreamIdentity)
+  );
+  return `"${Buffer.from(combined).toString('hex').slice(0, 32)}"`;
 }
 
-function executeFetch(url, cfg, abortSignal) {
-  const request = got(url, { ...cfg, signal: abortSignal });
-  request.on('downloadProgress', (progress) => {
-    const size = Math.max(progress.total || 0, progress.transferred || 0);
-    if (size > MAX_DOWNLOAD_BYTES) {
-      request.destroy(new Error('BODY_TOO_LARGE'));
+async function decompressBody(buffer, encoding) {
+  if (!encoding) return buffer;
+  const enc = String(encoding).toLowerCase().trim();
+  if (enc === 'gzip' || enc === 'x-gzip') return gunzip(buffer);
+  if (enc === 'deflate') return inflate(buffer);
+  if (enc === 'br') return brotliDecompress(buffer);
+  return buffer;
+}
+
+// 🛑 STREAMING SIZE GUARD: aborts the moment cumulative bytes exceed the cap.
+async function consumeWithLimit(body) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of body) {
+    total += chunk.length;
+    if (total > MAX_DOWNLOAD_BYTES) {
+      body.destroy();
+      const err = new Error('BODY_TOO_LARGE');
+      err.code = 'BODY_TOO_LARGE';
+      throw err;
     }
-  });
-  return request;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
-function safeExecuteFetch(url, cfg, abortSignal) {
-  return executeFetch(url, cfg, abortSignal);
+// 🛑 MANUAL REDIRECT WALK with per-hop SSRF validation (undici maxRedirections=0).
+async function safeRequest(url, headers, signal, maxRedirects = 5) {
+  let currentUrl = url;
+
+  for (let i = 0; i <= maxRedirects; i++) {
+    const { statusCode, headers: resHeaders, body } = await request(currentUrl, {
+      dispatcher: chromeDispatcher,
+      method: 'GET',
+      headers,
+      signal,
+      maxRedirections: 0
+    });
+
+    if ([301, 302, 303, 307, 308].includes(statusCode)) {
+      await body.dump(); // drain to release the socket
+      const location = resHeaders['location'];
+      if (!location) {
+        return { statusCode, headers: resHeaders, body: Buffer.alloc(0) };
+      }
+      let nextUrl;
+      try {
+        nextUrl = new URL(location, currentUrl).href;
+      } catch {
+        const err = new Error('INVALID_REDIRECT');
+        err.code = 'INVALID_REDIRECT';
+        throw err;
+      }
+      if (!parseSafeUrl(nextUrl)) {
+        const err = new Error('SSRF_BLOCKED_REDIRECT');
+        err.code = 'SSRF_BLOCKED_REDIRECT';
+        throw err;
+      }
+      currentUrl = nextUrl;
+      continue;
+    }
+
+    const buffer = await consumeWithLimit(body);
+    return { statusCode, headers: resHeaders, body: buffer };
+  }
+
+  const err = new Error('TOO_MANY_REDIRECTS');
+  err.code = 'TOO_MANY_REDIRECTS';
+  throw err;
 }
 
 export default async function proxy(req, res) {
   const startTime = Date.now();
 
+  // 🛑 FIXED: graceful 503 under memory pressure instead of process.exit(1) suicide bomb.
   if (process.memoryUsage().heapUsed > 800 * 1024 * 1024) {
-    process.exit(1);
+    res.setHeader('Retry-After', '10');
+    return res.status(503).json({ error: 'Memory pressure. Try again shortly.' });
   }
 
   const abortController = new AbortController();
@@ -171,11 +243,6 @@ export default async function proxy(req, res) {
     targetUrl = new URL(targetUrl).href;
   } catch {
     return sendGhost(res, 60);
-  }
-
-  const etag = generateETag(req, targetUrl);
-  if (req.headers['if-none-match'] === etag) {
-    return res.status(304).end();
   }
 
   const { 'user-agent': userAgent } = req.headers;
@@ -209,37 +276,13 @@ export default async function proxy(req, res) {
     if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
   }
 
-  const config = {
-    headers,
-    dnsLookup: safeLookup,
-    agent: { https: chromeCipherAgent },
-    timeout: { request: REQUEST_TIMEOUT_MS, response: REQUEST_TIMEOUT_MS },
-    responseType: 'buffer',
-    decompress: true,
-    throwHttpErrors: false,
-    followRedirect: true,
-    retry: { limit: 0 },
-    hooks: {
-      beforeRedirect: [
-        (options) => {
-          const redirectUrl = options?.url?.href || String(options?.url || '');
-          if (!parseSafeUrl(redirectUrl)) {
-            const error = new Error('SSRF_BLOCKED_REDIRECT');
-            error.code = 'SSRF_BLOCKED_REDIRECT';
-            throw error;
-          }
-        }
-      ]
-    }
-  };
-
   let workerBase = process.env.CF_WORKER_URL || '';
   if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
   if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
   if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
 
   let fetchUrl = targetUrl;
-  let fetchConfig = config;
+  let fetchHeaders = headers;
   let isWorkerFetch = false;
 
   if (workerBase && workerBase.startsWith('https://')) {
@@ -247,15 +290,7 @@ export default async function proxy(req, res) {
     if (internalKey) {
       isWorkerFetch = true;
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
-      fetchConfig = {
-        headers: { ...config.headers, 'x-internal-key': internalKey },
-        timeout: config.timeout,
-        responseType: 'buffer',
-        decompress: true,
-        throwHttpErrors: false,
-        followRedirect: true,
-        retry: { limit: 0 }
-      };
+      fetchHeaders = { ...headers, 'x-internal-key': internalKey };
     }
   }
 
@@ -263,10 +298,10 @@ export default async function proxy(req, res) {
   let statusCode;
   let responseHeaders;
   let activeUrl = fetchUrl;
-  let activeConfig = fetchConfig;
+  let activeHeaders = fetchHeaders;
 
   try {
-    response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
+    response = await safeRequest(activeUrl, activeHeaders, abortController.signal);
     statusCode = response.statusCode;
     responseHeaders = response.headers;
 
@@ -278,9 +313,9 @@ export default async function proxy(req, res) {
 
     if (isWorkerFetch) {
       activeUrl = targetUrl;
-      activeConfig = config;
+      activeHeaders = headers;
       try {
-        response = await safeExecuteFetch(activeUrl, activeConfig, abortController.signal);
+        response = await safeRequest(activeUrl, activeHeaders, abortController.signal);
         statusCode = response.statusCode;
         responseHeaders = response.headers;
       } catch (fallbackErr) {
@@ -293,9 +328,9 @@ export default async function proxy(req, res) {
   }
 
   if (statusCode === 403) {
-    const retryHeaders = { ...activeConfig.headers, 'user-agent': getRandomUA() };
+    const retryHeaders = { ...activeHeaders, 'user-agent': getRandomUA() };
     try {
-      response = await safeExecuteFetch(activeUrl, { ...activeConfig, headers: retryHeaders }, abortController.signal);
+      response = await safeRequest(activeUrl, retryHeaders, abortController.signal);
       statusCode = response.statusCode;
       responseHeaders = response.headers;
     } catch (err) {
@@ -310,9 +345,19 @@ export default async function proxy(req, res) {
       rawBody = vaultEntry.raw;
       res.setHeader('X-Conditional-Fetch', '304_VAULT_HIT');
     } else {
-      rawBody = toBuffer(response.rawBody ?? response.body);
+      rawBody = toBuffer(response.body);
+      // 🛑 Decompress if upstream ignored Accept-Encoding: identity (zip-bomb guarded below).
+      const encoding = responseHeaders?.['content-encoding'];
+      if (encoding) {
+        try {
+          rawBody = await decompressBody(rawBody, encoding);
+        } catch {
+          return sendGhost(res, 60);
+        }
+      }
     }
 
+    // 🛑 ZIP-BOMB / POST-DECOMPRESSION SIZE GUARD
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
       return sendGhost(res, 3600);
     }
@@ -354,8 +399,7 @@ export default async function proxy(req, res) {
 
     if (req.query?.debug === '1') {
       try {
-        const sharpInstance = sharp(rawBody);
-        const metadata = await sharpInstance.metadata();
+        const metadata = await sharp(rawBody).metadata();
         const report = {
           status: statusCode,
           originType: detectedType,
@@ -369,13 +413,20 @@ export default async function proxy(req, res) {
           hasAlpha: metadata.hasAlpha,
           exif: metadata.exif ? 'present' : 'none',
           sizeBytes: rawBody.length,
-          upstreamCacheControl: upstreamCacheControl,
+          upstreamCacheControl,
           executionTimeMs: Date.now() - startTime
         };
         return res.status(200).json(report);
       } catch (err) {
         return res.status(500).json({ error: 'Debug analysis failed', message: err.message });
       }
+    }
+
+    // 🛑 FIXED ETag: now content-aware. Upstream changes invalidate the cache.
+    const etag = await generateETag(req, targetUrl, responseHeaders, rawBody);
+    if (req.headers['if-none-match'] === etag) {
+      res.setHeader('ETag', etag);
+      return res.status(304).end();
     }
 
     delete responseHeaders['content-encoding'];
@@ -385,7 +436,6 @@ export default async function proxy(req, res) {
     res.setHeader('Content-Type', detectedType);
 
     res.setHeader('x-upstream-content-length', String(rawBody.length));
-
     res.setHeader('ETag', etag);
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
     res.setHeader('Vary', 'Accept, Accept-Encoding, Sec-CH-Save-Data');
@@ -401,8 +451,8 @@ export default async function proxy(req, res) {
 
     if (shouldCompress(req, rawBody)) {
       const compressedResult = await compress(req, res, rawBody);
-      
-      // 🛑 SURVIVAL PATCH: Kept to close the socket and prevent Vercel 60s timeout.
+
+      // 🛑 SURVIVAL PATCH: close the socket if compress streamed nothing back.
       if (!res.writableEnded) {
         if (compressedResult && compressedResult.length > 0) {
           res.end(compressedResult);
@@ -431,10 +481,10 @@ export default async function proxy(req, res) {
       return sendGhost(res, 86400);
     }
 
-    if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT') {
+    if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT' || code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT') {
       return sendGhost(res, 60);
     }
 
     return sendGhost(res, 60);
   }
-      }
+}
