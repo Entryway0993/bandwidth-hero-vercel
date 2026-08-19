@@ -3,10 +3,13 @@ import express from 'express';
 import morgan from 'morgan';
 import helmet from 'helmet';
 import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import authenticate from './src/authenticate.js';
 import params from './src/params.js';
 import proxy from './src/proxy.js';
 import { getMetrics, checkHealth } from './src/compress.js';
+
+const brotliCompress = promisify(zlib.brotliCompress);
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -26,18 +29,16 @@ if (process.env.LOG === '1') {
   }));
 }
 
-// 🛑 THE RESPONSE COMPRESSOR (Brotli JSON)
-// Compresses all JSON responses with Brotli if the client accepts it.
-// Falls back to uncompressed JSON if compression fails.
+// 🛑 FIXED: Async Brotli compression. No more event loop blocking.
 app.use((req, res, next) => {
   const acceptEncoding = req.headers['accept-encoding'] || '';
   if (!acceptEncoding.includes('br')) return next();
 
   const originalJson = res.json.bind(res);
-  res.json = (body) => {
+  res.json = async (body) => {
     const raw = JSON.stringify(body);
     try {
-      const compressed = zlib.brotliCompressSync(Buffer.from(raw), {
+      const compressed = await brotliCompress(Buffer.from(raw), {
         params: {
           [zlib.constants.BROTLI_PARAM_QUALITY]: 4,
         },
@@ -56,7 +57,9 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
     res.setHeader('Allow', 'GET');
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // 🛑 CORS: Lock to specific origin if configured, otherwise allow all for extension compatibility.
+    const corsOrigin = process.env.CORS_ORIGIN || '*';
+    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET');
     res.setHeader('Access-Control-Allow-Headers', 'x-api-key, content-type');
     res.setHeader('Access-Control-Max-Age', '86400');
@@ -79,12 +82,10 @@ app.use((req, res, next) => {
 app.get('/healthz', (req, res) => res.status(200).json({ status: 'OK' }));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-// 🛑 THE ORACLE'S LEDGER (Wired to a real route)
 app.get('/metrics', authenticate, (req, res) => {
   res.json(getMetrics());
 });
 
-// 🛑 THE HEARTBEAT SENTINEL (Wired to a route the Edge Middleware does NOT intercept)
 app.get('/deep-health', async (req, res) => {
   try {
     const health = await checkHealth();
