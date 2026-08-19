@@ -1,6 +1,6 @@
 {
   "name": "bandwidth-hero-proxy",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Data compression service that converts images to low-res WebP, AVIF or JPEG on the fly.",
   "type": "module",
   "author": "Anatoliy Yastreb",
@@ -15,10 +15,11 @@
   "dependencies": {
     "dotenv": "^17.2.2",
     "express": "^5.2.1",
-    "got": "^15.1.0",
     "helmet": "^8.1.0",
     "ipaddr.js": "^2.2.0",
+    "lru-cache": "^11.0.2",
     "morgan": "^1.10.1",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.3",
+    "undici": "^7.3.0"
   }
 }
