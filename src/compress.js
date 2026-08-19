@@ -829,10 +829,7 @@ async function detectImageType(buffer, metadata) {
 }
 
 function calculateQuality(analysis, baseQuality) {
-  if (analysis.isAnime) return ANIME_QUALITY;
-  if (analysis.isMangaStrip || analysis.isMangaPage) return Math.min(baseQuality + 10, 90);
-  if (analysis.isGrayscale) return Math.min(baseQuality + 5, 85);
-  if (analysis.entropy > 7.5) return PHOTO_QUALITY;
+  
   return baseQuality;
 }
 
