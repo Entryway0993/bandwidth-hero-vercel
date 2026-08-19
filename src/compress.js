@@ -2,6 +2,16 @@ import sharp from 'sharp';
 import { createHash, webcrypto } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { LRUCache } from 'lru-cache';
+import {
+  buildAnalysisContext,
+  detectImageTypeFromFrame,
+  generatePerceptualHashFromFrame,
+  generatePlaceholderAndPaletteFromFrame,
+  detectSkewFromFrame,
+  detectHalftoneFromFrame,
+  detectLineArtFromFrame,
+  detectAlphaStrippableFromFrame
+} from './analysisFrame.js';
 
 const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
@@ -355,6 +365,7 @@ const ENABLE_CHRONOS_SCRIBE = envBool('ENABLE_CHRONOS_SCRIBE', true);
 const ENABLE_ORACLE_LEDGER = envBool('ENABLE_ORACLE_LEDGER', true);
 const ENABLE_HEARTBEAT_SENTINEL = envBool('ENABLE_HEARTBEAT_SENTINEL', true);
 const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
+const ENABLE_SHARED_ANALYSIS_FRAME = envBool('ENABLE_SHARED_ANALYSIS_FRAME', true);
 
 // ============================================================
 // HELPER FUNCTIONS
