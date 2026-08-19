@@ -7,7 +7,6 @@ export default function middleware(request) {
   const url = new URL(request.url);
 
   // 🛑 HEALTH CHECK AT THE EDGE
-  // Returns 200 OK instantly without waking up Node.js.
   if (url.pathname === '/healthz' || url.pathname === '/health') {
     return new Response(JSON.stringify({ status: 'ok', timestamp: Date.now() }), {
       status: 200,
@@ -19,12 +18,11 @@ export default function middleware(request) {
   }
 
   // 🛑 PROXY BADGE AT THE EDGE
-  // Returns proxy info instantly for monitoring.
   if (url.pathname === '/badge' || url.pathname === '/info') {
     return new Response(JSON.stringify({
       proxy: 'bandwidth-hero',
       version: '2.0',
-      features: ['avif', 'webp', 'manga-optimization', 'edge-sentinel'],
+      features: ['avif', 'webp', 'manga-optimization', 'edge-sentinel', 'tier-warden'],
       timestamp: Date.now()
     }), {
       status: 200,
@@ -36,7 +34,6 @@ export default function middleware(request) {
   }
 
   // 🛑 METHOD FILTERING AT THE EDGE
-  // Rejects non-GET/HEAD requests instantly.
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
       status: 405,
@@ -48,6 +45,5 @@ export default function middleware(request) {
     });
   }
 
-  // Pass all other requests to the Node.js function
   return;
 }
