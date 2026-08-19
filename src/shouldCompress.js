@@ -5,6 +5,9 @@ const EXCLUDED_TYPES = new Set([
   'image/vnd.microsoft.icon'
 ]);
 
+// 🛑 ALIGNED: 70MB absolute cap. Matches MAX_DOWNLOAD_BYTES and CONCURRENCY_TIERS[0].
+const MAX_COMPRESS_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (70 * 1024 * 1024);
+
 export default function shouldCompress(req, buffer) {
   const { originType } = req.opts || {};
 
@@ -16,9 +19,9 @@ export default function shouldCompress(req, buffer) {
     return false;
   }
 
-  // 🛑 1GB RAM / 60s CONSTRAINT: O(1) Short-Circuit.
-  // Bypass compression entirely for massive files to protect serverless memory.
-  if (buffer.length > 14 * 1024 * 1024) {
+  // 🛑 O(1) Short-Circuit: Reject anything above the 70MB cap.
+  // The Tier Warden in compress.js handles concurrency for sizes below this.
+  if (buffer.length > MAX_COMPRESS_BYTES) {
     return false;
   }
 
