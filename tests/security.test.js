@@ -34,8 +34,8 @@ describe('🛡️ urlGuard - SSRF Protection', () => {
 });
 
 describe('🧠 shouldCompress - Memory & Logic Guards', () => {
-  test('should reject files > 14MB to protect serverless memory', () => {
-    const largeBuffer = Buffer.alloc(15 * 1024 * 1024); // 15MB
+  test('should reject files > 70MB to protect serverless memory', () => {
+    const largeBuffer = Buffer.alloc(75 * 1024 * 1024); // 75MB
     const req = { opts: { originType: 'image/jpeg' } };
     assert.equal(shouldCompress(req, largeBuffer), false);
   });
