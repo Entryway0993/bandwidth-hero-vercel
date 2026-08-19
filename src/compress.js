@@ -1,8 +1,9 @@
 import sharp from 'sharp';
-import { createHash } from 'crypto';
-import { PassThrough } from 'stream';
-import os from 'os';
+import { createHash, webcrypto } from 'node:crypto';
+import { PassThrough } from 'node:stream';
 import { LRUCache } from 'lru-cache';
+
+const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
 // 🛑 HARD CAP: libvips internal cache limited to 700MB.
 // Prevents unbounded memory growth across sequential encodes.
@@ -362,8 +363,11 @@ const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
 // 🛑 ASYNC exact hash (replaces sync MD5 that blocked event loop)
 async function generateExactHash(buffer) {
   try {
-    const digest = await crypto.subtle.digest('SHA-256', buffer);
-    return Buffer.from(digest).toString('hex').slice(0, 16);
+    if (subtle) {
+      const digest = await subtle.digest('SHA-256', buffer);
+      return Buffer.from(digest).toString('hex').slice(0, 16);
+    }
+
     return createHash('sha256').update(buffer).digest('hex').slice(0, 16);
   } catch {
     return null;
@@ -393,10 +397,16 @@ async function generatePlaceholderAndPalette(buffer) {
   try {
     const { data, info } = await sharp(buffer)
       .resize(32, 32, { fit: 'inside' })
+      .toColourspace('srgb')
+      .removeAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const channels = info.channels;
+    const channels = info.channels ?? 3;
+
+    if (channels < 3) {
+      return { placeholder: null, palette: [], stdev: 0, isVoid: false };
+    }
     let sum = 0;
     let sumSq = 0;
     const pixelCount = data.length / channels;
