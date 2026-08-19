@@ -1,6 +1,7 @@
 import dns from 'node:dns';
 import net from 'node:net';
 import ipaddr from 'ipaddr.js';
+import { LRUCache } from 'lru-cache';
 
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
@@ -23,25 +24,19 @@ const BLOCKED_SUFFIXES = [
   '.exit'
 ];
 
-// 🛑 THE DNS MEMORY PALACE (LRU Resolver Cache)
-const DNS_CACHE = new Map();
-const DNS_TTL = 60000; // 60 seconds
+// 🛑 THE DNS MEMORY PALACE (O(1) LRU Resolver Cache)
+// Replaced hand-rolled Map + O(N) eviction with lru-cache.
+const DNS_CACHE = new LRUCache({
+  max: 1000,
+  ttl: 60000 // 60 seconds
+});
 
 function getCachedDns(hostname) {
-  const entry = DNS_CACHE.get(hostname);
-  if (entry && Date.now() - entry.time < DNS_TTL) {
-    return entry.data;
-  }
-  return null;
+  return DNS_CACHE.get(hostname) ?? null;
 }
 
 function setCachedDns(hostname, data) {
-  // Simple LRU: if cache gets too big, evict the oldest entry
-  if (DNS_CACHE.size > 1000) {
-    const firstKey = DNS_CACHE.keys().next().value;
-    DNS_CACHE.delete(firstKey);
-  }
-  DNS_CACHE.set(hostname, { time: Date.now(), data });
+  DNS_CACHE.set(hostname, data);
 }
 
 function ssrfError() {
@@ -73,8 +68,6 @@ export function isPublicIP(ip) {
     }
 
     // 🛑 SURGICAL FIX: Block Teredo addresses (2001:0000::/32).
-    // Teredo tunnels can encapsulate private IPv4 addresses (e.g., 127.0.0.1),
-    // bypassing the unicast range check. ipaddr.js classifies Teredo as 'unicast'.
     if (addr.kind() === 'ipv6') {
       const teredoNetwork = ipaddr.parse('2001:0000::');
       if (addr.match(teredoNetwork, 32)) {
@@ -177,9 +170,9 @@ export function safeLookup(hostname, options, callback) {
 
     if (family === 4) addresses = addresses.filter(a => a.family === 4);
     if (family === 6) addresses = addresses.filter(a => a.family === 6);
-    
+
     if (!addresses.length) return callback(ssrfError());
-    
+
     addresses.sort((a, b) => {
       if (a.family === b.family) return 0;
       return a.family === 4 ? -1 : 1;
@@ -240,4 +233,4 @@ export function safeLookup(hostname, options, callback) {
     .catch(err => {
       callback(err);
     });
-      }
+}
