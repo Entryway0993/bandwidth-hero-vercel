@@ -1,6 +1,6 @@
-import crypto from 'node:crypto';
-import zlib from 'node:zlib';
-import { promisify } from 'node:util';
+import { createHash, webcrypto } from 'node:crypto';
+import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
+import { Readable } from 'node:stream';
 import { request, Agent } from 'undici';
 import sharp from 'sharp';
 import { LRUCache } from 'lru-cache';
@@ -9,9 +9,7 @@ import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
-const gunzip = promisify(zlib.gunzip);
-const inflate = promisify(zlib.inflate);
-const brotliDecompress = promisify(zlib.brotliDecompress);
+const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (24 * 1024 * 1024);
@@ -125,27 +123,65 @@ async function generateETag(req, targetUrl, upstreamHeaders, body) {
   const upstreamLen = upstreamHeaders?.['content-length'];
 
   let upstreamIdentity;
+
   if (upstreamEtag || upstreamLM) {
     upstreamIdentity = `${upstreamEtag || ''}|${upstreamLM || ''}|${upstreamLen || ''}`;
-  } else {
-    const digest = await crypto.subtle.digest('SHA-256', body);
+  } else if (subtle) {
+    const digest = await subtle.digest('SHA-256', body);
     upstreamIdentity = Buffer.from(digest).toString('hex');
+  } else {
+    upstreamIdentity = createHash('sha256').update(body).digest('hex');
   }
 
-  const combined = await crypto.subtle.digest(
-    'SHA-256',
-    Buffer.from(paramsFingerprint + '|' + upstreamIdentity)
-  );
-  return `"${Buffer.from(combined).toString('hex').slice(0, 32)}"`;
+  const material = Buffer.from(paramsFingerprint + '|' + upstreamIdentity);
+
+  if (subtle) {
+    const combined = await subtle.digest('SHA-256', material);
+    return `"${Buffer.from(combined).toString('hex').slice(0, 32)}"`;
+  }
+
+  return `"${createHash('sha256').update(material).digest('hex').slice(0, 32)}"`;
 }
+
+const MAX_DECOMPRESSED_BYTES = Math.max(MAX_DOWNLOAD_BYTES, 128 * 1024 * 1024);
 
 async function decompressBody(buffer, encoding) {
   if (!encoding) return buffer;
+
   const enc = String(encoding).toLowerCase().trim();
-  if (enc === 'gzip' || enc === 'x-gzip') return gunzip(buffer);
-  if (enc === 'deflate') return inflate(buffer);
-  if (enc === 'br') return brotliDecompress(buffer);
-  return buffer;
+
+  let decompressor;
+
+  if (enc === 'gzip' || enc === 'x-gzip') {
+    decompressor = createGunzip();
+  } else if (enc === 'deflate') {
+    decompressor = createInflate();
+  } else if (enc === 'br') {
+    decompressor = createBrotliDecompress();
+  } else {
+    return buffer;
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let totalLength = 0;
+
+    const stream = Readable.from(buffer).pipe(decompressor);
+
+    stream.on('data', (chunk) => {
+      totalLength += chunk.length;
+
+      if (totalLength > MAX_DECOMPRESSED_BYTES) {
+        stream.destroy(new Error('DECOMPRESS_BOMB'));
+        return;
+      }
+
+      chunks.push(chunk);
+    });
+
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', (err) => reject(err));
+  });
 }
 
 // 🛑 STREAMING SIZE GUARD: aborts the moment cumulative bytes exceed the cap.
@@ -214,7 +250,7 @@ export default async function proxy(req, res) {
   const startTime = Date.now();
 
   // 🛑 FIXED: graceful 503 under memory pressure instead of process.exit(1) suicide bomb.
-  if (process.memoryUsage().heapUsed > 800 * 1024 * 1024) {
+  if (process.memoryUsage().heapUsed > 700 * 1024 * 1024) {
     res.setHeader('Retry-After', '10');
     return res.status(503).json({ error: 'Memory pressure. Try again shortly.' });
   }
