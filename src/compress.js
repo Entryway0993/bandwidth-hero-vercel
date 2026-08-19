@@ -2,6 +2,12 @@ import sharp from 'sharp';
 import { createHash } from 'crypto';
 import { PassThrough } from 'stream';
 import os from 'os';
+import { LRUCache } from 'lru-cache';
+
+// 🛑 HARD CAP: libvips internal cache limited to 800MB.
+// Prevents unbounded memory growth across sequential encodes.
+const SHARP_CACHE_MEMORY_MB = parseInt(process.env.SHARP_CACHE_MEMORY_MB, 10) || 800;
+sharp.cache({ memory: SHARP_CACHE_MEMORY_MB, files: 0, items: 100 });
 
 // ============================================================
 // CONFIGURATION
@@ -47,8 +53,7 @@ const metrics = {
     quantumSorcerer: 0,
     formatDuelist: 0,
     metadataReaper: 0,
-    streamReaper: 0,
-    lorekeeper: 0,
+    streamReaper: 0
   },
   chronosStateHistory: [],
 };
@@ -127,7 +132,6 @@ function gracefulShutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   console.log(`[GUILLOTINE-GRACE] ${signal} received. Shutting down gracefully.`);
-  console.log(`[GUILLOTINE-GRACE] Active requests: ${activeRequests}, Active encodes: ${activeEncodes}`);
 
   const forceTimeout = setTimeout(() => {
     console.log('[GUILLOTINE-GRACE] Timeout reached. Forcing shutdown.');
@@ -135,7 +139,6 @@ function gracefulShutdown(signal) {
   }, SHUTDOWN_TIMEOUT);
 
   const checkInterval = setInterval(() => {
-    console.log(`[GUILLOTINE-GRACE] Waiting... active requests: ${activeRequests}, active encodes: ${activeEncodes}`);
     if (activeRequests === 0 && activeEncodes === 0) {
       clearTimeout(forceTimeout);
       clearInterval(checkInterval);
@@ -149,31 +152,86 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ============================================================
-// CACHES
+// CACHES (O(1) LRU, byte-bounded, no pixel vandalism)
 // ============================================================
 
-const perceptualCache = new Map();
-const PERCEPTUAL_CACHE_MAX = 500;
+// 🛑 Perceptual cache: fuzzy match for visually similar images.
+const perceptualCache = new LRUCache({
+  max: 500,
+  maxSize: 200 * 1024 * 1024, // 200MB cap
+  sizeCalculation: (entry) => entry.buffer.length
+});
 
-const lorekeeperCache = new Map();
-const LOREKEEPER_CACHE_MAX = 200;
+// 🛑 Exact cache: replaces Lorekeeper steganography.
+// Keyed by MD5 of input buffer. No pixel modification. No double-encoding.
+const exactCache = new LRUCache({
+  max: 200,
+  maxSize: 100 * 1024 * 1024, // 100MB cap
+  sizeCalculation: (entry) => entry.buffer.length
+});
 
 // ============================================================
-// FEATURE: THE SEMAPHORE WARDEN (Concurrency Control)
+// FEATURE: THE TIER WARDEN (Size-Based Concurrency Tiers)
 // ============================================================
 
-const CPU_CORES = os.cpus().length;
-const MAX_CONCURRENT_ENCODES = parseInt(process.env.MAX_CONCURRENT_ENCODES) || Math.max(2, CPU_CORES);
+const MAX_MEMORY_SLOTS = parseInt(process.env.MAX_MEMORY_SLOTS, 10) || 80;
+const MB = 1024 * 1024;
+
+// 🛑 HARD TIERS: Each tier caps concurrency for its size class.
+// All tiers share a global slot budget to prevent cross-tier OOM.
+const CONCURRENCY_TIERS = [
+  { maxMB: 70, maxConcurrent: 1 },   // 70MB × 1 × 10x = 700MB
+  { maxMB: 35, maxConcurrent: 2 },   // 35MB × 2 × 10x = 700MB
+  { maxMB: 17, maxConcurrent: 4 },   // 17MB × 4 × 10x = 680MB
+  { maxMB: 8,  maxConcurrent: 8 },   //  8MB × 8 × 10x = 640MB
+  { maxMB: 4,  maxConcurrent: 16 },  //  4MB × 16 × 10x = 640MB
+  { maxMB: 2,  maxConcurrent: 32 },  //  2MB × 32 × 10x = 640MB
+  { maxMB: 1,  maxConcurrent: 64 },  //  1MB × 64 × 10x = 640MB
+];
+
+const activeEncodesByTier = new Array(CONCURRENCY_TIERS.length).fill(0);
+let activeSlots = 0;
 let activeEncodes = 0;
 
-function acquireSemaphore() {
-  if (isShuttingDown) return false;
-  if (activeEncodes >= MAX_CONCURRENT_ENCODES) return false;
+function acquireSemaphore(bufferLength) {
+  if (isShuttingDown) return { acquired: false, reason: 'SHUTTING_DOWN' };
+
+  const sizeMB = bufferLength / MB;
+  const tierIndex = CONCURRENCY_TIERS.findIndex(t => sizeMB <= t.maxMB);
+
+  // Image exceeds the largest tier → reject outright.
+  if (tierIndex === -1) {
+    return { acquired: false, reason: 'TOO_LARGE' };
+  }
+
+  const tier = CONCURRENCY_TIERS[tierIndex];
+  const slotsNeeded = Math.max(1, Math.ceil(sizeMB));
+
+  // Tier concurrency check.
+  if (activeEncodesByTier[tierIndex] >= tier.maxConcurrent) {
+    return { acquired: false, reason: 'TIER_SATURATED', tierIndex };
+  }
+
+  // Global memory budget check (prevents cross-tier OOM).
+  if (activeSlots + slotsNeeded > MAX_MEMORY_SLOTS) {
+    return { acquired: false, reason: 'MEMORY_SATURATED', tierIndex };
+  }
+
+  activeEncodesByTier[tierIndex]++;
+  activeSlots += slotsNeeded;
   activeEncodes++;
-  return true;
+  return { acquired: true, tierIndex, slotsNeeded };
 }
 
-function releaseSemaphore() {
+function releaseSemaphore(tierIndex, slotsNeeded) {
+  if (tierIndex >= 0 && activeEncodesByTier[tierIndex] > 0) {
+    activeEncodesByTier[tierIndex]--;
+  }
+  if (activeSlots >= slotsNeeded) {
+    activeSlots -= slotsNeeded;
+  } else {
+    activeSlots = 0;
+  }
   if (activeEncodes > 0) activeEncodes--;
 }
 
@@ -197,33 +255,31 @@ function getAverageEncodeTime() {
 }
 
 function getChronosState(pixelCount) {
-  // 🛑 SURGICAL FIX: Cold-start safeguard.
-  // On the very first request, we have no history. Effort 9 on a 15MP image will timeout.
-  // Use a safe baseline for the first request, then let Chronos learn from actual times.
   if (rollingEncodeTimes.length === 0) {
     const millions = pixelCount / 1_000_000;
     let effort = 9;
-    if (millions > 8) effort = 4;        // 8MP+ : effort 4 (~55s) — 30% timeout risk
-    else if (millions > 4) effort = 5;   // 4-8MP: effort 5 (~25s) — safe
-    else if (millions > 2) effort = 7;   // 2-4MP: effort 7 (~10s) — safe
+    if (millions > 50) effort = 2;       // Extreme: 50MP+ 
+    else if (millions > 30) effort = 3;  // 30-50MP
+    else if (millions > 15) effort = 4;  // 15-30MP
+    else if (millions > 8) effort = 5;   // 8-15MP
+    else if (millions > 4) effort = 6;   // 4-8MP
+    else if (millions > 2) effort = 7;   // 2-4MP
     return { state: 'COLD-START', effort };
   }
 
   const avg = getAverageEncodeTime();
-
-  // 100% of 60s budget. 8 gradual effort levels (2→9).
-  const ENCODE_BUDGET_MS = 60000;
-  const SEGMENT = ENCODE_BUDGET_MS / 8; // 7500ms per step
+  const ENCODE_BUDGET_MS = 55000; // 55s budget (5s safety margin under 60s)
+  const SEGMENT = ENCODE_BUDGET_MS / 8;
 
   let effort;
-  if      (avg > SEGMENT * 7) { effort = 2; }  // >52.5s
-  else if (avg > SEGMENT * 6) { effort = 3; }  // >45.0s
-  else if (avg > SEGMENT * 5) { effort = 4; }  // >37.5s
-  else if (avg > SEGMENT * 4) { effort = 5; }  // >30.0s
-  else if (avg > SEGMENT * 3) { effort = 6; }  // >22.5s
-  else if (avg > SEGMENT * 2) { effort = 7; }  // >15.0s
-  else if (avg > SEGMENT * 1) { effort = 8; }  // >7.5s
-  else                        { effort = 9; }  // <7.5s
+  if      (avg > SEGMENT * 7) { effort = 2; }
+  else if (avg > SEGMENT * 6) { effort = 3; }
+  else if (avg > SEGMENT * 5) { effort = 4; }
+  else if (avg > SEGMENT * 4) { effort = 5; }
+  else if (avg > SEGMENT * 3) { effort = 6; }
+  else if (avg > SEGMENT * 2) { effort = 7; }
+  else if (avg > SEGMENT * 1) { effort = 8; }
+  else                        { effort = 9; }
 
   const state =
     effort >= 9 ? 'COLD' :
@@ -262,7 +318,6 @@ const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
 const ENABLE_LUMINANCE = envBool('ENABLE_LUMINANCE', true);
 const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
 const ENABLE_DESKEW = envBool('ENABLE_DESKEW', true);
-const ENABLE_LOREKEEPER = envBool('ENABLE_LOREKEEPER', true);
 const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
 const ENABLE_DITHER_ASSASSIN = envBool('ENABLE_DITHER_ASSASSIN', true);
 const ENABLE_BANDING_EXORCIST = envBool('ENABLE_BANDING_EXORCIST', true);
@@ -288,6 +343,16 @@ const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
 // HELPER FUNCTIONS
 // ============================================================
 
+// 🛑 ASYNC exact hash (replaces sync MD5 that blocked event loop)
+async function generateExactHash(buffer) {
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', buffer);
+    return Buffer.from(digest).toString('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
 async function generatePerceptualHash(buffer) {
   try {
     const { data } = await sharp(buffer)
@@ -307,20 +372,6 @@ async function generatePerceptualHash(buffer) {
   }
 }
 
-function checkPerceptualCache(hash) {
-  if (!hash) return null;
-  return perceptualCache.get(hash) || null;
-}
-
-function setPerceptualCache(hash, result) {
-  if (!hash) return;
-  if (perceptualCache.size >= PERCEPTUAL_CACHE_MAX) {
-    const firstKey = perceptualCache.keys().next().value;
-    perceptualCache.delete(firstKey);
-  }
-  perceptualCache.set(hash, result);
-}
-
 async function generatePlaceholderAndPalette(buffer) {
   try {
     const { data, info } = await sharp(buffer)
@@ -329,7 +380,6 @@ async function generatePlaceholderAndPalette(buffer) {
       .toBuffer({ resolveWithObject: true });
 
     const channels = info.channels;
-
     let sum = 0;
     let sumSq = 0;
     const pixelCount = data.length / channels;
@@ -433,80 +483,6 @@ async function detectSkew(buffer) {
   }
 }
 
-function generateLoreHash(buffer) {
-  return createHash('md5').update(buffer).digest('hex').slice(0, 8);
-}
-
-async function readLoreSignature(buffer) {
-  try {
-    const { data, info } = await sharp(buffer)
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const channels = info.channels;
-    if (channels < 3) return null;
-
-    const blueIdx = 2;
-    let hashStr = '';
-    const maxPixels = Math.min(32, Math.floor(data.length / channels));
-
-    for (let i = 0; i < maxPixels; i++) {
-      hashStr += (data[i * channels + blueIdx] & 1).toString();
-    }
-
-    if (hashStr.length < 32) return null;
-
-    const hashInt = parseInt(hashStr, 2);
-    return hashInt.toString(16).padStart(8, '0');
-  } catch {
-    return null;
-  }
-}
-
-async function embedLoreSignature(buffer, loreHash) {
-  try {
-    const { data, info } = await sharp(buffer)
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const channels = info.channels;
-    if (channels < 3) return buffer;
-
-    const blueIdx = 2;
-    const hashInt = parseInt(loreHash, 16);
-    const hashBits = hashInt.toString(2).padStart(32, '0');
-
-    const maxPixels = Math.min(32, Math.floor(data.length / channels));
-
-    for (let i = 0; i < maxPixels; i++) {
-      const idx = i * channels + blueIdx;
-      data[idx] = (data[idx] & 0xFE) | parseInt(hashBits[i], 10);
-    }
-
-    const outputBuffer = await sharp(data, {
-      raw: { width: info.width, height: info.height, channels: channels },
-    }).png().toBuffer();
-
-    return outputBuffer;
-  } catch {
-    return buffer;
-  }
-}
-
-function checkLoreCache(hash) {
-  if (!hash) return null;
-  return lorekeeperCache.get(hash) || null;
-}
-
-function setLoreCache(hash, result) {
-  if (!hash) return;
-  if (lorekeeperCache.size >= LOREKEEPER_CACHE_MAX) {
-    const firstKey = lorekeeperCache.keys().next().value;
-    lorekeeperCache.delete(firstKey);
-  }
-  lorekeeperCache.set(hash, result);
-}
-
 let _noiseTilePromise = null;
 function getNoiseTile() {
   if (!_noiseTilePromise) {
@@ -574,30 +550,6 @@ function verifyOutput(buffer, format) {
   }
 }
 
-async function formatDuel(buffer, targetQuality) {
-  try {
-    const sample = await sharp(buffer)
-      .resize(256, 256, { fit: 'inside', withoutEnlargement: true })
-      .toBuffer();
-
-    const avifSample = await sharp(sample)
-      .avif({ quality: Math.min(targetQuality, 63), effort: 2 })
-      .toBuffer();
-
-    const webpSample = await sharp(sample)
-      .webp({ quality: targetQuality, effort: 2 })
-      .toBuffer();
-
-    if (avifSample.length <= webpSample.length) {
-      return { winner: 'avif', avifSize: avifSample.length, webpSize: webpSample.length };
-    } else {
-      return { winner: 'webp', avifSize: avifSample.length, webpSize: webpSample.length };
-    }
-  } catch {
-    return { winner: 'avif', avifSize: 0, webpSize: 0 };
-  }
-}
-
 function getWebpPreset(analysis, lineArtResult, origW, origH) {
   if (!ENABLE_WEBP_PRESET) return 'default';
   if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) return 'drawing';
@@ -614,51 +566,41 @@ function judgeQuality(analysis, metadata) {
   const entropy = analysis.entropy || 0;
   const colorVariance = analysis.colorVariance || 0;
 
-  // 🛑 SURGICAL FIX: Effective resolution for vertical strips.
-  // A 800x15000 strip is visually 800px wide, not 15000px.
   const aspectRatio = height / Math.max(width, 1);
   const isVerticalStrip = aspectRatio > 2.5;
   const resolution = isVerticalStrip ? width : Math.max(width, height);
 
   let score = 0;
 
-  // Sharpness (0–35): Sharp images tolerate more compression.
   if (sharpness > 80) score += 35;
   else if (sharpness > 60) score += 28;
   else if (sharpness > 40) score += 21;
   else if (sharpness > 25) score += 14;
   else if (sharpness > 15) score += 7;
 
-  // Resolution (0–25): Larger images have more redundant pixels.
   if (resolution > 2000) score += 25;
   else if (resolution > 1500) score += 20;
   else if (resolution > 1000) score += 15;
   else if (resolution > 700) score += 10;
   else if (resolution > 400) score += 5;
 
-  // Entropy (5–25): Moderate entropy = photographic = compressible.
   if (entropy > 5 && entropy < 7) score += 25;
   else if (entropy > 4 && entropy < 8) score += 18;
   else if (entropy > 3 && entropy < 8.5) score += 12;
   else score += 5;
 
-  // 🛑 SURGICAL FIX: Color variance factor.
-  // Colorful images (photos/anime) have more perceptual redundancy.
-  // Grayscale/flat images (manga/text) need quality to preserve lines.
-  if (colorVariance > 80) score += 15;       // colorful → compress harder
-  else if (colorVariance > 40) score += 8;   // moderate color
-  else if (colorVariance < 15) score -= 10;  // grayscale → preserve quality
-
-  // Max possible: 35+25+25+15 = 100. Min possible: 0+0+5-10 = -5.
+  if (colorVariance > 80) score += 15;
+  else if (colorVariance > 40) score += 8;
+  else if (colorVariance < 15) score -= 10;
 
   let grade, qualityAdjust;
-  if (score >= 90) { grade = 'S'; qualityAdjust = -15; }  // max compression
+  if (score >= 90) { grade = 'S'; qualityAdjust = -15; }
   else if (score >= 75) { grade = 'A'; qualityAdjust = -10; }
   else if (score >= 60) { grade = 'B'; qualityAdjust = -5; }
   else if (score >= 45) { grade = 'C'; qualityAdjust = 0; }
   else if (score >= 30) { grade = 'D'; qualityAdjust = 5; }
   else if (score >= 15) { grade = 'E'; qualityAdjust = 10; }
-  else { grade = 'F'; qualityAdjust = 15; }                // preserve detail
+  else { grade = 'F'; qualityAdjust = 15; }
 
   return { grade, qualityAdjust, score };
 }
@@ -789,7 +731,12 @@ async function detectLineArt(buffer, analysis) {
 }
 
 async function detectImageType(buffer, metadata) {
-  const stats = await sharp(buffer).stats();
+  // 🛑 OPTIMIZED: resize before stats() to reduce memory on massive images
+  const statsSource = metadata.width > 4096 || metadata.height > 4096
+    ? await sharp(buffer).resize(4096, 4096, { fit: 'inside', withoutEnlargement: true }).toBuffer()
+    : buffer;
+
+  const stats = await sharp(statsSource).stats();
   const { channels, width, height } = stats;
 
   let totalEntropy = 0;
@@ -822,8 +769,6 @@ async function detectImageType(buffer, metadata) {
   const isGrayscale = colorVariance < 15;
   const isHighContrast = totalEntropy > 6.5;
   const isColorful = colorVariance > 80;
-  // 🛑 SURGICAL FIX: stats() returns broken dimensions for tall strips.
-  // Use metadata dimensions which are verified correct.
   const aspectRatio = (metadata.height || height) / (metadata.width || width);
 
   const isMangaStrip = aspectRatio > 2.5;
@@ -848,7 +793,6 @@ async function detectImageType(buffer, metadata) {
 }
 
 function calculateQuality(analysis, baseQuality) {
-  
   return baseQuality;
 }
 
@@ -919,7 +863,7 @@ export default async function compress(req, res, buffer) {
 
     if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
-      const MAX_ASPECT_RATIO = 200; // Raised from 50 to accommodate webtoon strips
+      const MAX_ASPECT_RATIO = 200;
 
       const width = metadata.width || 0;
       const height = metadata.height || 0;
@@ -934,7 +878,6 @@ export default async function compress(req, res, buffer) {
       const maxDim = Math.max(width, height);
       const aspectRatio = maxDim / minDim;
 
-      // Only reject truly absurd ratios (>200:1). Vertical strips are valid.
       if (aspectRatio > MAX_ASPECT_RATIO) {
         res.status(413);
         res.setHeader('X-Dimension-Overlord', 'REJECTED_ASPECT');
@@ -946,6 +889,27 @@ export default async function compress(req, res, buffer) {
       res.setHeader('X-Timeout-Guillotine', 'ABORTED');
       res.status(499);
       return Buffer.alloc(0);
+    }
+
+    // 🛑 EXACT CACHE: Non-destructive replacement for Lorekeeper steganography.
+    const exactHash = await generateExactHash(buffer);
+    if (exactHash) {
+      const exactHit = exactCache.get(exactHash);
+      if (exactHit) {
+        res.setHeader('X-Exact-Cache', 'HIT');
+        res.setHeader('Content-Type', exactHit.contentType);
+        if (exactHit.placeholder) res.setHeader('X-Placeholder', exactHit.placeholder);
+        if (exactHit.grade) res.setHeader('X-Quality-Grade', exactHit.grade);
+        if (exactHit.palette && exactHit.palette.length > 0) {
+          res.setHeader('X-Palette', exactHit.palette.join(','));
+        }
+        if (ENABLE_ORACLE_LEDGER) {
+          metrics.cacheHits++;
+          metrics.totalBytesOut += exactHit.buffer.length;
+          metrics.totalBytesSaved += buffer.length - exactHit.buffer.length;
+        }
+        return exactHit.buffer;
+      }
     }
 
     let thumbResult = null;
@@ -969,32 +933,8 @@ export default async function compress(req, res, buffer) {
       return Buffer.alloc(0);
     }
 
-    let loreHash = null;
-    let loreHit = false;
-    if (ENABLE_LOREKEEPER && format === 'png') {
-      loreHash = await readLoreSignature(buffer);
-      if (loreHash) {
-        const loreCached = checkLoreCache(loreHash);
-        if (loreCached) {
-          loreHit = true;
-          res.setHeader('X-Lorekeeper', 'HIT');
-          res.setHeader('Content-Type', loreCached.contentType);
-          if (loreCached.placeholder) res.setHeader('X-Placeholder', loreCached.placeholder);
-          if (loreCached.grade) res.setHeader('X-Quality-Grade', loreCached.grade);
-          if (loreCached.palette && loreCached.palette.length > 0) {
-            res.setHeader('X-Palette', loreCached.palette.join(','));
-          }
-          if (ENABLE_ORACLE_LEDGER) {
-            metrics.totalBytesOut += loreCached.buffer.length;
-            metrics.totalBytesSaved += buffer.length - loreCached.buffer.length;
-          }
-          return loreCached.buffer;
-        }
-      }
-    }
-
     const pHash = await generatePerceptualHash(buffer);
-    const cachedResult = checkPerceptualCache(pHash);
+    const cachedResult = pHash ? perceptualCache.get(pHash) : null;
 
     if (cachedResult) {
       res.setHeader('X-Perceptual-Cache', 'HIT');
@@ -1022,13 +962,15 @@ export default async function compress(req, res, buffer) {
       return Buffer.alloc(0);
     }
 
-    let semaphoreAcquired = false;
+    // 🛑 TIER WARDEN: Acquire semaphore based on image size tier.
+    let semaphoreResult = { acquired: false, tierIndex: -1, slotsNeeded: 0 };
     if (ENABLE_SEMAPHORE_WARDEN) {
-      semaphoreAcquired = acquireSemaphore();
-      if (!semaphoreAcquired) {
+      semaphoreResult = acquireSemaphore(buffer.length);
+      if (!semaphoreResult.acquired) {
         res.status(503);
-        res.setHeader('X-Semaphore-Warden', 'SATURATED');
-        res.setHeader('X-Active-Encodes', `${activeEncodes}/${MAX_CONCURRENT_ENCODES}`);
+        res.setHeader('X-Semaphore-Warden', semaphoreResult.reason);
+        res.setHeader('X-Active-Encodes', `${activeEncodes}`);
+        res.setHeader('X-Active-Slots', `${activeSlots}/${MAX_MEMORY_SLOTS}`);
         res.setHeader('Retry-After', '5');
         if (ENABLE_ORACLE_LEDGER) {
           metrics.semaphoreRejections++;
@@ -1036,7 +978,8 @@ export default async function compress(req, res, buffer) {
         return Buffer.alloc(0);
       }
       res.setHeader('X-Semaphore-Warden', 'ACTIVE');
-      res.setHeader('X-Active-Encodes', `${activeEncodes}/${MAX_CONCURRENT_ENCODES}`);
+      res.setHeader('X-Semaphore-Tier', `${semaphoreResult.tierIndex}`);
+      res.setHeader('X-Active-Slots', `${activeSlots}/${MAX_MEMORY_SLOTS}`);
     }
 
     try {
@@ -1098,23 +1041,20 @@ export default async function compress(req, res, buffer) {
 
       const pixelCount = (metadata.width || 0) * (metadata.height || 0);
       const chronos = ENABLE_CHRONOS_SCRIBE ? getChronosState(pixelCount) : { state: 'COLD', effort: 9 };
-  
-  // 🛑 SURGICAL FIX: Chronos can overshoot for large images.
-  // Clamp effort based on pixel count AFTER Chronos decides.
-  // This doesn't replace Chronos — it just prevents it from choosing
-  // an effort that will mathematically timeout for THIS image size.
-  const millions = pixelCount / 1_000_000;
-  let effortCeiling;
-  if (millions > 12)      effortCeiling = 5;
-  else if (millions > 8)  effortCeiling = 6;
-  else if (millions > 4)  effortCeiling = 7;
-  else if (millions > 2)  effortCeiling = 8;
-  else                    effortCeiling = 9;
 
-  const adaptiveEffort = Math.min(chronos.effort, effortCeiling);
+      const millions = pixelCount / 1_000_000;
+      let effortCeiling;
+      if (millions > 80)      effortCeiling = 2;
+      else if (millions > 50) effortCeiling = 3;
+      else if (millions > 30) effortCeiling = 4;
+      else if (millions > 15) effortCeiling = 5;
+      else if (millions > 8)  effortCeiling = 6;
+      else if (millions > 4)  effortCeiling = 7;
+      else if (millions > 2)  effortCeiling = 8;
+      else                    effortCeiling = 9;
 
-      // 🛑 SURGICAL FIX #1: Use req.opts.format from params.js instead of re-parsing query params.
-      // params.js already handles Accept header fallback, query overrides, and ALLOW_ACCEPT_FALLBACK.
+      const adaptiveEffort = Math.min(chronos.effort, effortCeiling);
+
       const requestedFormat = req.opts?.format || req.query.f || req.query.format;
       let outputFormat = 'jpeg';
 
@@ -1130,9 +1070,6 @@ export default async function compress(req, res, buffer) {
         outputFormat = 'png';
       }
 
-      // 🛑 SURGICAL FIX #2: Use req.opts.quality from params.js.
-      // params.js reads `l`, `q`, and `quality` params and clamps them.
-      // The old code only read `q` and `quality`, missing the `l` param entirely.
       const baseQuality = req.opts?.quality ?? (parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY);
       let quality = calculateQuality(analysis, baseQuality);
 
@@ -1186,8 +1123,6 @@ export default async function compress(req, res, buffer) {
 
       pipeline = pipeline.toColourspace('srgb');
 
-      // 🛑 SURGICAL FIX: bw=0 means the user EXPLICITLY wants color.
-      // Only auto-grayscale if the user hasn't disabled it.
       const userExplicitlyWantsColor = req.opts?.grayscale === false;
       const userExplicitlyWantsBW = req.opts?.grayscale === true;
       if (FORCE_GRAYSCALE || userExplicitlyWantsBW || (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)) {
@@ -1243,8 +1178,6 @@ export default async function compress(req, res, buffer) {
 
       const { width: origW, height: origH } = metadata;
 
-      // 🛑 SURGICAL FIX #4 & #5: Use req.opts.maxDim and req.opts.maxStripWidth from params.js.
-      // params.js handles mode presets (manga/strip/photo/raw) and Save-Data throttling.
       const effectiveStripWidth = (req.opts?.maxStripWidth > 0) ? req.opts.maxStripWidth : MAX_STRIP_WIDTH;
       const effectiveMaxDim = (req.opts?.maxDim > 0) ? req.opts.maxDim : viewportMaxDim;
 
@@ -1331,7 +1264,6 @@ export default async function compress(req, res, buffer) {
       const encodeStart = Date.now();
 
       const needsBuffer = ENABLE_ENCODING_VERIFIER ||
-                          ENABLE_LOREKEEPER ||
                           ditherAssassinActive ||
                           (outputFormat === 'png' && !ENABLE_PROGRESSIVE_PNG);
 
@@ -1395,6 +1327,7 @@ export default async function compress(req, res, buffer) {
         pipeline.pipe(passthrough);
         passthrough.pipe(res);
 
+        // 🛑 ABORT LISTENER (streaming path)
         if (ENABLE_TIMEOUT_GUILLOTINE) {
           signal.addEventListener('abort', () => {
             pipeline.destroy();
@@ -1402,7 +1335,7 @@ export default async function compress(req, res, buffer) {
             if (!res.writableEnded) {
               res.end();
             }
-          });
+          }, { once: true });
         }
 
         await new Promise((resolve, reject) => {
@@ -1428,10 +1361,12 @@ export default async function compress(req, res, buffer) {
         return null;
       }
 
+      // 🛑 NON-STREAMING PATH (with abort listener fix)
+      let pipelinePromise;
+
       if (ditherAssassinActive) {
         pipeline = pipeline.threshold(128);
-
-        outputBuffer = await pipeline.png({
+        pipelinePromise = pipeline.png({
           palette: true,
           colours: 2,
           compressionLevel: 9,
@@ -1445,7 +1380,7 @@ export default async function compress(req, res, buffer) {
 
         switch (outputFormat) {
           case 'avif':
-            outputBuffer = await pipeline.avif({
+            pipelinePromise = pipeline.avif({
               quality: Math.min(quality, 63),
               effort: adaptiveEffort,
               chromaSubsampling: chromaSubsampling,
@@ -1454,7 +1389,7 @@ export default async function compress(req, res, buffer) {
             break;
 
           case 'webp':
-            outputBuffer = await pipeline.webp({
+            pipelinePromise = pipeline.webp({
               quality: quality,
               effort: adaptiveEffort,
               smartSubsample: true,
@@ -1472,7 +1407,7 @@ export default async function compress(req, res, buffer) {
             );
 
             if (useQuantumSorcerer) {
-              outputBuffer = await pipeline.png({
+              pipelinePromise = pipeline.png({
                 compressionLevel: 8,
                 palette: true,
                 colours: 256,
@@ -1483,7 +1418,7 @@ export default async function compress(req, res, buffer) {
               res.setHeader('X-Quantum-Sorcerer', 'ACTIVE');
               recordMetric('quantumSorcerer');
             } else {
-              outputBuffer = await pipeline.png({
+              pipelinePromise = pipeline.png({
                 compressionLevel: 8,
                 palette: analysis.isGrayscale,
                 quality: quality,
@@ -1496,7 +1431,7 @@ export default async function compress(req, res, buffer) {
 
           case 'jpeg':
           default:
-            outputBuffer = await pipeline.jpeg({
+            pipelinePromise = pipeline.jpeg({
               quality: quality,
               progressive: true,
               mozjpeg: true,
@@ -1510,26 +1445,21 @@ export default async function compress(req, res, buffer) {
         }
       }
 
-      // 🛑 DIAGNOSTIC: Log exact encoding parameters
-      console.log('[ENCODE-DIAG]', JSON.stringify({
-        outputFormat,
-        quality,
-        grade: judgeResult?.grade || 'N/A',
-        adaptiveEffort,
-        chronosState: chronos.state,
-        avgEncodeTime: Math.round(getAverageEncodeTime()),
-        origW,
-        origH,
-        aspectRatio: analysis.aspectRatio,
-        targetWidth,
-        targetHeight,
-        bufferLength: outputBuffer?.length || 0,
-        inputLength: buffer.length,
-        isGrayscale: analysis.isGrayscale,
-        isMangaStrip: analysis.isMangaStrip,
-        isMangaPage: analysis.isMangaPage,
-      }));
-      
+      // 🛑 ABORT LISTENER (non-streaming path) — kills the pipeline if client disconnects.
+      if (ENABLE_TIMEOUT_GUILLOTINE) {
+        const onAbort = () => {
+          pipeline.destroy();
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        try {
+          outputBuffer = await pipelinePromise;
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+        }
+      } else {
+        outputBuffer = await pipelinePromise;
+      }
+
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
@@ -1587,27 +1517,17 @@ export default async function compress(req, res, buffer) {
         res.setHeader('X-Bytes-Saved', `${(bytesSaved / 1024).toFixed(1)}KB`);
       }
 
-      if (ENABLE_LOREKEEPER && outputFormat === 'png' && !loreHit && !ditherAssassinActive) {
-        const newLoreHash = generateLoreHash(buffer);
-        outputBuffer = await embedLoreSignature(outputBuffer, newLoreHash);
-        setLoreCache(newLoreHash, {
-          buffer: outputBuffer,
-          contentType: contentType,
-          placeholder: placeholder,
-          grade: judgeResult ? judgeResult.grade : null,
-          palette: palette,
-        });
-        res.setHeader('X-Lorekeeper', 'EMBEDDED');
-        recordMetric('lorekeeper');
-      }
-
-      setPerceptualCache(pHash, {
+      // 🛑 CACHE INSERTION: Store in both caches.
+      const cacheEntry = {
         buffer: outputBuffer,
         contentType: contentType,
         placeholder: placeholder,
         grade: judgeResult ? judgeResult.grade : null,
         palette: palette,
-      });
+      };
+
+      if (exactHash) exactCache.set(exactHash, cacheEntry);
+      if (pHash) perceptualCache.set(pHash, cacheEntry);
 
       res.setHeader('X-Perceptual-Cache', 'MISS');
       res.setHeader('X-Encode-Quality', String(quality));
@@ -1634,8 +1554,8 @@ export default async function compress(req, res, buffer) {
       return outputBuffer;
 
     } finally {
-      if (ENABLE_SEMAPHORE_WARDEN && semaphoreAcquired) {
-        releaseSemaphore();
+      if (ENABLE_SEMAPHORE_WARDEN && semaphoreResult.acquired) {
+        releaseSemaphore(semaphoreResult.tierIndex, semaphoreResult.slotsNeeded);
       }
     }
 
@@ -1652,12 +1572,12 @@ export default async function compress(req, res, buffer) {
     }
     if (!res.headersSent && !res.writableEnded) {
       res.setHeader('Content-Type', `image/${req.opts?.originType || 'jpeg'}`);
-      res.end(buffer); 
+      res.end(buffer);
     } else if (!res.writableEnded) {
-      res.end(); 
+      res.end();
     }
     return null;
   } finally {
     activeRequests--;
   }
-               }
+}
