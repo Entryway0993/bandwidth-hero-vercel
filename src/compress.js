@@ -4,10 +4,26 @@ import { PassThrough } from 'stream';
 import os from 'os';
 import { LRUCache } from 'lru-cache';
 
-// 🛑 HARD CAP: libvips internal cache limited to 800MB.
+// 🛑 HARD CAP: libvips internal cache limited to 700MB.
 // Prevents unbounded memory growth across sequential encodes.
-const SHARP_CACHE_MEMORY_MB = parseInt(process.env.SHARP_CACHE_MEMORY_MB, 10) || 800;
+const SHARP_CACHE_MEMORY_MB = parseInt(process.env.SHARP_CACHE_MEMORY_MB, 10) || 700;
 sharp.cache({ memory: SHARP_CACHE_MEMORY_MB, files: 0, items: 100 });
+
+// 🛑 PATCH 2: FIXED CRYPTO CRASH (Replace generateExactHash function ~line 236)
+async function generateExactHash(buffer) {
+  try {
+    // createHash is already imported at the top of the file
+    return createHash('sha256').update(buffer).digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
+// 🛑 PATCH 3: PIXEL LIMIT MAXED OUT (Replace sharp initialization ~line 584)
+      let pipeline = sharp(buffer, {
+        animated: isAnimated,
+        limitInputPixels: 0, // 🛑 0 disables the limit entirely, making it as high as possible.
+      });
 
 // ============================================================
 // CONFIGURATION
@@ -348,6 +364,7 @@ async function generateExactHash(buffer) {
   try {
     const digest = await crypto.subtle.digest('SHA-256', buffer);
     return Buffer.from(digest).toString('hex').slice(0, 16);
+    return createHash('sha256').update(buffer).digest('hex').slice(0, 16);
   } catch {
     return null;
   }
@@ -1109,7 +1126,7 @@ export default async function compress(req, res, buffer) {
 
       let pipeline = sharp(buffer, {
         animated: isAnimated,
-        limitInputPixels: 268402689,
+        limitInputPixels: 0,
       });
 
       if (ENABLE_METADATA_REAPER) {
