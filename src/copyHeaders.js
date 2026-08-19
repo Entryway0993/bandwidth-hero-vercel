@@ -13,7 +13,7 @@ export default function copyHeaders(response, res) {
 
   for (const [key, value] of Object.entries(response.headers)) {
     const lowerKey = key.toLowerCase();
-    
+
     // Execute any header not on the whitelist.
     if (ALLOWED_HEADERS.has(lowerKey)) {
       res.setHeader(lowerKey, value);
