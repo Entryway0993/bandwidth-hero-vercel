@@ -35,22 +35,35 @@ app.use((req, res, next) => {
   if (!acceptEncoding.includes('br')) return next();
 
   const originalJson = res.json.bind(res);
+
   res.json = async (body) => {
     const raw = JSON.stringify(body);
+    const rawLength = Buffer.byteLength(raw);
+
+    if (rawLength < 1024) {
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Length', String(rawLength));
+      return res.end(raw);
+    }
+
     try {
       const compressed = await brotliCompress(Buffer.from(raw), {
         params: {
           [zlib.constants.BROTLI_PARAM_QUALITY]: 4,
         },
       });
+
+      res.setHeader('Vary', 'Accept-Encoding');
       res.setHeader('Content-Encoding', 'br');
       res.setHeader('Content-Type', 'application/json');
       res.setHeader('Content-Length', String(compressed.length));
+
       return res.end(compressed);
     } catch {
       return originalJson(body);
     }
   };
+
   next();
 });
 
