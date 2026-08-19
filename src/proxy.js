@@ -815,7 +815,91 @@ function getChromaSubsampling(analysis) {
 // MAIN COMPRESS FUNCTION
 // ============================================================
 
-export default async function compress(req, res, buffer) {
+import { fetch as undiciFetch } from 'undici';
+import shouldCompress from './shouldCompress.js';
+import copyHeaders from './copyHeaders.js';
+
+// ... [Keep all existing code above this line intact] ...
+
+// 1. Rename the export to an internal function
+async function compressImage(req, res, buffer) {
+  // ... [Entire existing compress function body remains here] ...
+}
+
+// 2. Add the missing Express Middleware wrapper
+export default async function proxyMiddleware(req, res, next) {
+  const targetUrl = req.opts?.url;
+  if (!targetUrl) {
+    return res.status(400).json({ error: 'Missing target URL in req.opts' });
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout
+
+    // Fetch upstream using undici for connection pooling and proper abort handling
+    const upstreamRes = await undiciFetch(targetUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': req.headers['user-agent'] || 'Bandwidth-Hero/2.0',
+        'Accept': req.headers['accept'] || 'image/*,*/*;q=0.8',
+        'Accept-Encoding': 'identity', // Let our backend handle compression
+      },
+      signal: controller.signal,
+      redirect: 'follow'
+    });
+
+    clearTimeout(timeoutId);
+
+    // Pass through upstream errors (404, 403, 500)
+    if (!upstreamRes.ok) {
+      copyHeaders(upstreamRes, res);
+      res.status(upstreamRes.status);
+      const errBuffer = Buffer.from(await upstreamRes.arrayBuffer());
+      return res.end(errBuffer);
+    }
+
+    req.opts.originType = upstreamRes.headers.get('content-type') || 'application/octet-stream';
+    const buffer = Buffer.from(await upstreamRes.arrayBuffer());
+
+    // Validate MIME and size before touching Sharp
+    if (!shouldCompress(req, buffer)) {
+      copyHeaders(upstreamRes, res);
+      res.setHeader('Content-Length', buffer.length);
+      res.setHeader('X-Compression', 'SKIPPED');
+      return res.end(buffer);
+    }
+
+    // Execute the compression engine
+    const result = await compressImage(req, res, buffer);
+
+    // Handle Stream Reaper path (compressImage piped directly to res and returned null)
+    if (result === null) {
+      return; 
+    }
+
+    // Handle Buffer path (compressImage returned the processed buffer)
+    if (Buffer.isBuffer(result) && result.length > 0) {
+      res.setHeader('Content-Length', result.length);
+      return res.end(result);
+    }
+
+    // Fallback for empty buffers or silent failures
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'Compression yielded empty result' });
+    } else {
+      res.end();
+    }
+
+  } catch (err) {
+    console.error('[PROXY FETCH ERROR]', err.message);
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'Upstream fetch failed' });
+    } else {
+      res.end();
+    }
+  }
+}
   if (isShuttingDown) {
     res.status(503);
     res.setHeader('X-Guillotine-Grace', 'SHUTTING_DOWN');
