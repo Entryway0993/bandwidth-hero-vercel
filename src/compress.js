@@ -611,35 +611,54 @@ function judgeQuality(analysis, metadata) {
   const sharpness = analysis.sharpness || 0;
   const width = metadata.width || 0;
   const height = metadata.height || 0;
-  const resolution = Math.max(width, height);
   const entropy = analysis.entropy || 0;
+  const colorVariance = analysis.colorVariance || 0;
+
+  // 🛑 SURGICAL FIX: Effective resolution for vertical strips.
+  // A 800x15000 strip is visually 800px wide, not 15000px.
+  const aspectRatio = height / Math.max(width, 1);
+  const isVerticalStrip = aspectRatio > 2.5;
+  const resolution = isVerticalStrip ? width : Math.max(width, height);
 
   let score = 0;
 
-  if (sharpness > 80) score += 40;
-  else if (sharpness > 60) score += 32;
-  else if (sharpness > 40) score += 24;
-  else if (sharpness > 25) score += 16;
-  else if (sharpness > 15) score += 8;
+  // Sharpness (0–35): Sharp images tolerate more compression.
+  if (sharpness > 80) score += 35;
+  else if (sharpness > 60) score += 28;
+  else if (sharpness > 40) score += 21;
+  else if (sharpness > 25) score += 14;
+  else if (sharpness > 15) score += 7;
 
-  if (resolution > 2000) score += 30;
-  else if (resolution > 1500) score += 24;
-  else if (resolution > 1000) score += 18;
-  else if (resolution > 700) score += 12;
-  else if (resolution > 400) score += 6;
+  // Resolution (0–25): Larger images have more redundant pixels.
+  if (resolution > 2000) score += 25;
+  else if (resolution > 1500) score += 20;
+  else if (resolution > 1000) score += 15;
+  else if (resolution > 700) score += 10;
+  else if (resolution > 400) score += 5;
 
-  if (entropy > 5 && entropy < 7) score += 30;
-  else if (entropy > 4 && entropy < 8) score += 22;
-  else if (entropy > 3 && entropy < 8.5) score += 14;
-  else score += 6;
+  // Entropy (5–25): Moderate entropy = photographic = compressible.
+  if (entropy > 5 && entropy < 7) score += 25;
+  else if (entropy > 4 && entropy < 8) score += 18;
+  else if (entropy > 3 && entropy < 8.5) score += 12;
+  else score += 5;
+
+  // 🛑 SURGICAL FIX: Color variance factor.
+  // Colorful images (photos/anime) have more perceptual redundancy.
+  // Grayscale/flat images (manga/text) need quality to preserve lines.
+  if (colorVariance > 80) score += 15;       // colorful → compress harder
+  else if (colorVariance > 40) score += 8;   // moderate color
+  else if (colorVariance < 15) score -= 10;  // grayscale → preserve quality
+
+  // Max possible: 35+25+25+15 = 100. Min possible: 0+0+5-10 = -5.
 
   let grade, qualityAdjust;
-  if (score >= 85) { grade = 'S'; qualityAdjust = -10; }
-  else if (score >= 70) { grade = 'A'; qualityAdjust = -5; }
-  else if (score >= 55) { grade = 'B'; qualityAdjust = 0; }
-  else if (score >= 40) { grade = 'C'; qualityAdjust = 5; }
-  else if (score >= 25) { grade = 'D'; qualityAdjust = 10; }
-  else { grade = 'F'; qualityAdjust = 15; }
+  if (score >= 90) { grade = 'S'; qualityAdjust = -15; }  // max compression
+  else if (score >= 75) { grade = 'A'; qualityAdjust = -10; }
+  else if (score >= 60) { grade = 'B'; qualityAdjust = -5; }
+  else if (score >= 45) { grade = 'C'; qualityAdjust = 0; }
+  else if (score >= 30) { grade = 'D'; qualityAdjust = 5; }
+  else if (score >= 15) { grade = 'E'; qualityAdjust = 10; }
+  else { grade = 'F'; qualityAdjust = 15; }                // preserve detail
 
   return { grade, qualityAdjust, score };
 }
