@@ -1,19 +1,15 @@
-// server.js
 import 'dotenv/config';
 import express from 'express';
-import morgan from 'morgan';
 import helmet from 'helmet';
-import zlib from 'node:zlib';
-import { promisify } from 'node:util';
+import morgan from 'morgan';
+import crypto from 'node:crypto';
 import authenticate from './src/authenticate.js';
 import params from './src/params.js';
 import proxy from './src/proxy.js';
 import { getMetrics, checkHealth } from './src/compress.js';
-
-const brotliCompress = promisify(zlib.brotliCompress);
+import memoryGovernor from './src/memoryGovernor.js';
 
 const app = express();
-const PORT = parseInt(process.env.PORT, 10) || 3000;
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -21,15 +17,36 @@ app.set('trust proxy', 1);
 app.use(helmet({
   contentSecurityPolicy: false,
   frameguard: { action: 'deny' },
-  crossOriginResourcePolicy: { policy: "cross-origin" }
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  referrerPolicy: { policy: 'no-referrer' }
 }));
 
-if (process.env.LOG === '1') {
-  app.use(morgan('tiny', {
-    skip: (req) => !!(req.query.api || req.query.apikey || req.query.api_key || req.headers['x-api-key'])
-  }));
-}
+// F20: Request ID middleware
+app.use((req, res, next) => {
+  const reqId = req.headers['x-request-id'] || crypto.randomUUID();
+  req.id = reqId;
+  res.setHeader('X-Request-ID', reqId);
+  next();
+});
 
+// F5-MODIFIED / F15: Redact API keys in logs instead of skipping
+const redactFormat = morgan((tokens, req, res) => {
+  let url = tokens.url(req, res) || '';
+  url = url.replace(/([?&])(api|apikey|api_key)=([^&]*)/gi, '$1$2=[REDACTED]');
+  return [
+    tokens.method(req, res),
+    url,
+    tokens.status(req, res),
+    tokens.res(req, res, 'content-length'),
+    '-',
+    tokens['response-time'](req, res),
+    'ms'
+  ].join(' ');
+});
+
+app.use(redactFormat);
+
+// Brotli JSON compression for admin endpoints
 app.use((req, res, next) => {
   const acceptEncoding = req.headers['accept-encoding'] || '';
   if (!acceptEncoding.includes('br')) return next();
@@ -37,26 +54,20 @@ app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
 
   res.json = async (body) => {
-    const raw = JSON.stringify(body);
-    const rawLength = Buffer.byteLength(raw);
-
-    if (rawLength < 1024) {
-      res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Length', String(rawLength));
-      return res.end(raw);
-    }
-
     try {
-      const compressed = await brotliCompress(Buffer.from(raw), {
-        params: {
-          [zlib.constants.BROTLI_PARAM_QUALITY]: 4,
-        },
-      });
+      const { brotliCompressSync } = await import('node:zlib');
+      const raw = JSON.stringify(body);
 
-      res.setHeader('Vary', 'Accept-Encoding');
+      if (raw.length < 1024) {
+        return originalJson(body);
+      }
+
+      const compressed = brotliCompressSync(Buffer.from(raw));
+
       res.setHeader('Content-Encoding', 'br');
-      res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Length', String(compressed.length));
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Length', compressed.length);
+      res.setHeader('Vary', 'Accept-Encoding');
 
       return res.end(compressed);
     } catch {
@@ -66,6 +77,11 @@ app.use((req, res, next) => {
 
   next();
 });
+
+// CORS / OPTIONS — F8: allow OPTIONS through
+if (req.method === 'OPTIONS') {
+  // handled below in route-level, but ensure no 405
+}
 
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
@@ -77,60 +93,59 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Max-Age', '86400');
     return res.status(204).end();
   }
-
-  if (req.method === 'HEAD') {
-    res.setHeader('Allow', 'GET');
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'GET') {
-    res.setHeader('Allow', 'GET');
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
-
   next();
 });
 
-app.get('/healthz', (req, res) => res.status(200).json({ status: 'OK' }));
-app.get('/favicon.ico', (req, res) => res.status(204).end());
+// Health endpoints
+app.get('/healthz', (req, res) => {
+  res.json({ status: 'ok' });
+});
 
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
+// F17: /metrics requires auth
 app.get('/metrics', authenticate, (req, res) => {
   res.json(getMetrics());
 });
 
-app.get('/deep-health', async (req, res) => {
+// F17: /deep-health requires auth
+app.get('/deep-health', authenticate, async (req, res) => {
   try {
     const health = await checkHealth();
-    if (health.healthy) {
-      res.json(health);
-    } else {
-      res.status(503).json(health);
-    }
-  } catch {
+    res.status(health.healthy ? 200 : 503).json(health);
+  } catch (err) {
     res.status(500).json({ error: 'Health check failed' });
   }
 });
 
+// Main pipeline
 app.use(authenticate, params, proxy);
 
+// 404
 app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
+  res.status(404).json({ error: 'Not found' });
 });
 
+// Global error handler
 app.use((err, req, res, next) => {
+  const reqId = req.id || 'unknown';
   const safeMessage = err?.message ? String(err.message).split('?')[0] : 'Unknown error';
-  console.error('[Global Error]', safeMessage);
+  console.error(`[SERVER ERROR] [${reqId}]`, safeMessage);
 
-  if (!res.headersSent) {
-    res.status(500).json({ error: 'Internal server error' });
-  } else {
-    req.socket?.destroy();
+  if (res.headersSent) {
+    return req.socket?.destroy();
   }
+
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 if (!process.env.VERCEL) {
+  const PORT = parseInt(process.env.PORT, 10) || 3000;
   app.listen(PORT, () => {
-    console.log(`Listening on port ${PORT}`);
+    console.log(`[SERVER] Listening on port ${PORT}`);
+    console.log(`[SERVER] Memory ceiling: ${memoryGovernor.MEMORY_CEILING_MB}MB`);
   });
 }
 
