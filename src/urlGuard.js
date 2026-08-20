@@ -24,11 +24,9 @@ const BLOCKED_SUFFIXES = [
   '.exit'
 ];
 
-// 🛑 THE DNS MEMORY PALACE (O(1) LRU Resolver Cache)
-// Replaced hand-rolled Map + O(N) eviction with lru-cache.
 const DNS_CACHE = new LRUCache({
   max: 1000,
-  ttl: 60000 // 60 seconds
+  ttl: 60000
 });
 
 function getCachedDns(hostname) {
@@ -67,12 +65,43 @@ export function isPublicIP(ip) {
       addr = addr.toIPv4Address();
     }
 
-    // 🛑 SURGICAL FIX: Block Teredo addresses (2001:0000::/32).
     if (addr.kind() === 'ipv6') {
+      const lower = addr.toString().toLowerCase();
+
+      // Teredo 2001::/32
       const teredoNetwork = ipaddr.parse('2001:0000::');
-      if (addr.match(teredoNetwork, 32)) {
-        return false;
-      }
+      if (addr.match(teredoNetwork, 32)) return false;
+
+      // 6to4 2002::/16
+      const sixToFour = ipaddr.parse('2002::');
+      if (addr.match(sixToFour, 16)) return false;
+
+      // NAT64 64:ff9b::/48
+      const nat64 = ipaddr.parse('64:ff9b::');
+      if (addr.match(nat64, 48)) return false;
+
+      // Multicast ff00::/8
+      const multicast = ipaddr.parse('ff00::');
+      if (addr.match(multicast, 8)) return false;
+
+      // Unique local fc00::/7
+      const ula = ipaddr.parse('fc00::');
+      if (addr.match(ula, 7)) return false;
+
+      // Link-local fe80::/10
+      const linkLocal = ipaddr.parse('fe80::');
+      if (addr.match(linkLocal, 10)) return false;
+
+      // Loopback
+      if (lower === '::1') return false;
+
+      // Unspecified
+      if (lower === '::') return false;
+    }
+
+    if (addr.kind() === 'ipv4') {
+      const range = addr.range();
+      if (range !== 'unicast') return false;
     }
 
     return addr.range() === 'unicast';
@@ -144,7 +173,6 @@ export function safeLookup(hostname, options, callback) {
     return callback(ssrfError());
   }
 
-  // Fast path for direct IP literals.
   if (net.isIP(host)) {
     if (!isPublicIP(host)) {
       return callback(ssrfError());
@@ -163,7 +191,6 @@ export function safeLookup(hostname, options, callback) {
     return callback(null, host, ipFamily);
   }
 
-  // 🛑 DNS MEMORY PALACE (Check Cache)
   const cached = getCachedDns(host);
   if (cached) {
     let addresses = cached.slice();
@@ -183,7 +210,6 @@ export function safeLookup(hostname, options, callback) {
     return callback(null, chosen.address, chosen.family);
   }
 
-  // Non-blocking DNS resolution.
   const tasks = [];
 
   if (!family || family === 0 || family === 4) {
@@ -214,10 +240,8 @@ export function safeLookup(hostname, options, callback) {
         return callback(ssrfError());
       }
 
-      // 🛑 DNS MEMORY PALACE (Store in Cache)
       setCachedDns(host, addresses);
 
-      // Prefer IPv4, similar to verbatim:false behavior.
       addresses.sort((a, b) => {
         if (a.family === b.family) return 0;
         return a.family === 4 ? -1 : 1;
