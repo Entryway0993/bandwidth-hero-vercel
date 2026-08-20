@@ -1,3 +1,4 @@
+// server.js
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
@@ -29,7 +30,6 @@ if (process.env.LOG === '1') {
   }));
 }
 
-// 🛑 FIXED: Async Brotli compression. No more event loop blocking.
 app.use((req, res, next) => {
   const acceptEncoding = req.headers['accept-encoding'] || '';
   if (!acceptEncoding.includes('br')) return next();
@@ -70,7 +70,6 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
     res.setHeader('Allow', 'GET');
-    // 🛑 CORS: Lock to specific origin if configured, otherwise allow all for extension compatibility.
     const corsOrigin = process.env.CORS_ORIGIN || '*';
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET');
@@ -119,7 +118,9 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error('[Global Error]', err);
+  const safeMessage = err?.message ? String(err.message).split('?')[0] : 'Unknown error';
+  console.error('[Global Error]', safeMessage);
+
   if (!res.headersSent) {
     res.status(500).json({ error: 'Internal server error' });
   } else {
