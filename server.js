@@ -78,18 +78,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS / OPTIONS — F8: allow OPTIONS through
-if (req.method === 'OPTIONS') {
-  // handled below in route-level, but ensure no 405
-}
-
+// F8: CORS / OPTIONS handler
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
-    res.setHeader('Allow', 'GET');
+    res.setHeader('Allow', 'GET, HEAD, OPTIONS');
     const corsOrigin = process.env.CORS_ORIGIN || '*';
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
-    res.setHeader('Access-Control-Allow-Headers', 'x-api-key, content-type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'x-api-key, content-type, authorization');
     res.setHeader('Access-Control-Max-Age', '86400');
     return res.status(204).end();
   }
