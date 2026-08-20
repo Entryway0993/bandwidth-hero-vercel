@@ -8,17 +8,18 @@ import { parseSafeUrl, safeLookup } from './urlGuard.js';
 import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
+import memoryGovernor from './memoryGovernor.js';
 
 const createHash = crypto.createHash;
 const subtle = crypto.webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
-const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (24 * 1024 * 1024);
 const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
 
-const RAW_VAULT_MAX_BYTES = 30 * 1024 * 1024;
-const RAW_VAULT_MAX_ENTRY = 5 * 1024 * 1024;
-const RAW_VAULT_MAX_ENTRIES = 50;
+// F11: RAW_VAULT reduced, adaptive governor handles primary limits
+const RAW_VAULT_MAX_BYTES = 20 * 1024 * 1024;
+const RAW_VAULT_MAX_ENTRY = 4 * 1024 * 1024;
+const RAW_VAULT_MAX_ENTRIES = 30;
 
 const RAW_VAULT = new LRUCache({
   max: RAW_VAULT_MAX_ENTRIES,
@@ -55,13 +56,12 @@ const chromeDispatcher = new Agent({
   keepAliveTimeout: 10000
 });
 
+// F18-MODIFIED: General desktop UAs, no device-specific strings
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
-  'Mozilla/5.0 (Linux; Android 15; SM-A736B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
 ];
 
 function getRandomUA() {
@@ -89,6 +89,24 @@ function toBuffer(value) {
 function bypass(req, res, rawBody, statusCode = 200) {
   if (!res.headersSent) res.status(statusCode);
   res.end(rawBody);
+}
+
+// F15: Sanitize URLs for logging
+function sanitizeUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname;
+  } catch {
+    return String(url).split('?')[0];
+  }
+}
+
+// F15: Sanitize error messages
+function sanitizeError(err) {
+  let msg = err?.message ? String(err.message) : 'Unknown error';
+  msg = msg.replace(/\?[^\s]*/g, '');
+  msg = msg.replace(/(api[_-]?key|apikey|api|key|token|secret|password)=([^\s&]*)/gi, '$1=[REDACTED]');
+  return msg;
 }
 
 function detectContentType(buffer) {
@@ -157,7 +175,7 @@ async function sha256Hex(data) {
       return Buffer.from(digest).toString('hex');
     }
   } catch {
-    // Fall through to synchronous Node crypto.
+    // Fall through
   }
 
   if (typeof crypto.hash === 'function') {
@@ -175,8 +193,8 @@ async function generateETag(req, targetUrl, upstreamHeaders, body) {
     grayscale: req.opts?.grayscale,
     maxDim: req.opts?.maxDim,
     maxStripWidth: req.opts?.maxStripWidth,
-    sharpen: req.query?.sharpen,
-    rotate: req.query?.rotate
+    sharpen: req.opts?.sharpen,
+    rotate: req.opts?.rotate
   });
 
   const upstreamEtag = upstreamHeaders?.['etag'];
@@ -197,8 +215,7 @@ async function generateETag(req, targetUrl, upstreamHeaders, body) {
   return `"${digest.slice(0, 32)}"`;
 }
 
-const MAX_DECOMPRESSED_BYTES = Math.max(MAX_DOWNLOAD_BYTES, 128 * 1024 * 1024);
-
+// F4: Adaptive decompression budget
 async function decompressBody(buffer, encoding) {
   if (!encoding) return buffer;
 
@@ -216,6 +233,8 @@ async function decompressBody(buffer, encoding) {
     return buffer;
   }
 
+  const maxDecompressed = memoryGovernor.getDecompressBudget();
+
   return new Promise((resolve, reject) => {
     const chunks = [];
     let totalLength = 0;
@@ -225,7 +244,7 @@ async function decompressBody(buffer, encoding) {
     stream.on('data', (chunk) => {
       totalLength += chunk.length;
 
-      if (totalLength > MAX_DECOMPRESSED_BYTES) {
+      if (totalLength > maxDecompressed) {
         stream.destroy(new Error('DECOMPRESS_BOMB'));
         return;
       }
@@ -238,14 +257,16 @@ async function decompressBody(buffer, encoding) {
   });
 }
 
+// F4: Adaptive download limit
 async function consumeWithLimit(body) {
+  const maxDownload = memoryGovernor.getDownloadBudget();
   const chunks = [];
   let total = 0;
 
   for await (const chunk of body) {
     total += chunk.length;
 
-    if (total > MAX_DOWNLOAD_BYTES) {
+    if (total > maxDownload) {
       body.destroy();
       const err = new Error('BODY_TOO_LARGE');
       err.code = 'BODY_TOO_LARGE';
@@ -310,8 +331,10 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
 
 export default async function proxy(req, res) {
   const startTime = Date.now();
+  const reqId = req.id || 'unknown';
 
-  if (process.memoryUsage().heapUsed > 700 * 1024 * 1024) {
+  // F2-ADAPTIVE: Memory pressure gate
+  if (memoryGovernor.isUnderPressure()) {
     res.setHeader('Retry-After', '10');
     return res.status(503).json({ error: 'Memory pressure. Try again shortly.' });
   }
@@ -470,7 +493,9 @@ export default async function proxy(req, res) {
       }
     }
 
-    if (rawBody.length > MAX_DOWNLOAD_BYTES) {
+    // F4: Adaptive size check
+    const downloadBudget = memoryGovernor.getDownloadBudget();
+    if (rawBody.length > downloadBudget) {
       return sendGhost(res, 3600);
     }
 
@@ -483,16 +508,11 @@ export default async function proxy(req, res) {
       }
     }
 
-    const upstreamCacheControl = responseHeaders['cache-control'] || '';
-    const maxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
-
-    if (maxAgeMatch) {
-      const upstreamMaxAge = parseInt(maxAgeMatch[1], 10);
-
-      if (!Number.isNaN(upstreamMaxAge) && upstreamMaxAge > 0) {
-        responseHeaders['x-upstream-max-age'] = String(upstreamMaxAge);
-      }
-    }
+    // F3: Honor upstream cache-control
+    const upstreamCacheControl = String(responseHeaders['cache-control'] || '').toLowerCase();
+    const isNoStore = /no-store|private|no-cache/.test(upstreamCacheControl);
+    const upstreamMaxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
+    const upstreamMaxAge = upstreamMaxAgeMatch ? parseInt(upstreamMaxAgeMatch[1], 10) : null;
 
     if (statusCode === 404 || statusCode === 410) {
       return sendGhost(res, 86400);
@@ -530,14 +550,16 @@ export default async function proxy(req, res) {
           exif: metadata.exif ? 'present' : 'none',
           sizeBytes: rawBody.length,
           upstreamCacheControl,
-          executionTimeMs: Date.now() - startTime
+          executionTimeMs: Date.now() - startTime,
+          requestId: reqId
         };
 
         return res.status(200).json(report);
       } catch (err) {
         return res.status(500).json({
           error: 'Debug analysis failed',
-          message: String(err?.message || err)
+          message: sanitizeError(err),
+          requestId: reqId
         });
       }
     }
@@ -557,8 +579,18 @@ export default async function proxy(req, res) {
     res.setHeader('Content-Type', detectedType);
     res.setHeader('x-upstream-content-length', String(rawBody.length));
     res.setHeader('ETag', etag);
-    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
     res.setHeader('Vary', 'Accept, Accept-Encoding, Sec-CH-Save-Data');
+
+    // F3: Adaptive cache-control based on upstream policy
+    if (isNoStore) {
+      res.setHeader('Cache-Control', 'no-store');
+    } else if (upstreamMaxAge !== null && upstreamMaxAge > 0) {
+      const ttl = Math.min(upstreamMaxAge, 30 * 24 * 60 * 60);
+      res.setHeader('Cache-Control', `public, max-age=${ttl}, s-maxage=${ttl}`);
+      res.setHeader('x-upstream-max-age', String(upstreamMaxAge));
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+    }
 
     req.opts.originType = detectedType;
 
@@ -569,8 +601,8 @@ export default async function proxy(req, res) {
       return bypass(req, res, rawBody, statusCode);
     }
 
-    if (shouldCompress(req, rawBody)) {
-      const compressedResult = await compress(req, res, rawBody);
+    if (shouldCompress(req, rawBody, memoryGovernor)) {
+      const compressedResult = await compress(req, res, rawBody, memoryGovernor);
 
       if (!res.writableEnded) {
         if (compressedResult && compressedResult.length > 0) {
@@ -608,6 +640,9 @@ export default async function proxy(req, res) {
     ) {
       return sendGhost(res, 60);
     }
+
+    // F15: Sanitized error logging with request ID
+    console.error(`[PROXY ERROR] [${reqId}]`, sanitizeError(error));
 
     return sendGhost(res, 60);
   }
