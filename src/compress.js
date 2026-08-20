@@ -281,6 +281,21 @@ function envBool(name, fallback = false) {
   return v === '1' || v === 'true' || v === 'yes';
 }
 
+function parseTriState(value, defaultValue) {
+  if (Array.isArray(value)) {
+    value = value[0];
+  }
+
+  if (value === undefined) return defaultValue;
+
+  const str = String(value).trim().toLowerCase();
+
+  if (['1', 'true', 'yes', 'on'].includes(str)) return true;
+  if (['0', 'false', 'no', 'off'].includes(str)) return false;
+
+  return defaultValue;
+}
+
 const ENABLE_AVIF = envBool('ENABLE_AVIF', true);
 const ENABLE_WEBP = envBool('ENABLE_WEBP', true);
 const FORCE_JPEG = envBool('FORCE_JPEG', false);
