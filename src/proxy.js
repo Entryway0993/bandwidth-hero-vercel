@@ -14,7 +14,9 @@ const createHash = crypto.createHash;
 const subtle = crypto.webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
-const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 45000;
+const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 8000;
+const BODY_TIMEOUT_MS = parseInt(process.env.BODY_TIMEOUT_MS, 10) || 20000;
+const UPSTREAM_DEADLINE_MS = parseInt(process.env.UPSTREAM_DEADLINE_MS, 10) || 20000;
 
 // F11: RAW_VAULT reduced, adaptive governor handles primary limits
 const RAW_VAULT_MAX_BYTES = 20 * 1024 * 1024;
@@ -52,7 +54,7 @@ const chromeDispatcher = new Agent({
     lookup: safeLookup
   },
   headersTimeout: REQUEST_TIMEOUT_MS,
-  bodyTimeout: REQUEST_TIMEOUT_MS,
+  bodyTimeout: BODY_TIMEOUT_MS,
   keepAliveTimeout: 10000
 });
 
@@ -281,8 +283,14 @@ async function consumeWithLimit(body) {
 
 async function safeRequest(url, headers, signal, maxRedirects = 5) {
   let currentUrl = url;
+  const deadline = Date.now() + UPSTREAM_DEADLINE_MS;
 
   for (let i = 0; i <= maxRedirects; i++) {
+    if (Date.now() > deadline) {
+      const err = new Error('UPSTREAM_DEADLINE');
+      err.code = 'UPSTREAM_DEADLINE';
+      throw err;
+    }
     const { statusCode, headers: resHeaders, body } = await request(currentUrl, {
       dispatcher: chromeDispatcher,
       method: 'GET',
@@ -633,13 +641,14 @@ export default async function proxy(req, res) {
     }
 
     if (
-      code === 'ETIMEDOUT' ||
-      code === 'ERR_GOT_REQUEST_TIMEOUT' ||
-      code === 'UND_ERR_HEADERS_TIMEOUT' ||
-      code === 'UND_ERR_BODY_TIMEOUT'
-    ) {
-      return sendGhost(res, 60);
-    }
+  code === 'ETIMEDOUT' ||
+  code === 'ERR_GOT_REQUEST_TIMEOUT' ||
+  code === 'UND_ERR_HEADERS_TIMEOUT' ||
+  code === 'UND_ERR_BODY_TIMEOUT' ||
+  code === 'UPSTREAM_DEADLINE'
+) {
+  return sendGhost(res, 60);
+}
 
     // F15: Sanitized error logging with request ID
     console.error(`[PROXY ERROR] [${reqId}]`, sanitizeError(error));
