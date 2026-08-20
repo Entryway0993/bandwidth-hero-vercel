@@ -853,6 +853,48 @@ export default async function compress(req, res, buffer) {
     if (!format || format === 'raw') {
       return buffer;
     }
+    // FIXED: explicit profile + sharpen intent.
+    const modeValue = Array.isArray(req.query?.mode)
+      ? req.query.mode[0]
+      : (req.opts?.mode ?? req.query?.mode);
+
+    const mode = String(modeValue || '').toLowerCase();
+
+    const isRawMode = mode === 'raw' || mode === 'bypass';
+    const isPhotoMode = mode === 'photo' || mode === 'normal';
+    const isMangaMode = mode === 'manga' || mode === 'comic';
+    const isStripMode = [
+      'strip',
+      'webtoon',
+      'manhwa',
+      'manhua'
+    ].includes(mode);
+
+    const sharpenPreference = parseTriState(req.query?.sharpen, req.opts?.sharpen);
+
+    // Explicit raw/bypass disables optional enhancement filters.
+    const allowEnhancements = !isRawMode;
+
+    // Line-art/manga filters are allowed unless explicit photo profile says otherwise.
+    const allowLineArtFilters = allowEnhancements && !isPhotoMode;
+
+    // Photo cleanup filters are allowed unless explicit manga/strip profile says otherwise.
+    const allowPhotoFilters = allowEnhancements && !isMangaMode && !isStripMode;
+
+    const rotateParam = Array.isArray(req.query?.rotate)
+      ? req.query.rotate[0]
+      : req.query?.rotate;
+
+    const paramFingerprint = [
+      req.opts?.format,
+      req.opts?.quality,
+      req.opts?.grayscale,
+      req.opts?.maxDim,
+      req.opts?.maxStripWidth,
+      mode,
+      sharpenPreference === undefined ? '' : String(sharpenPreference),
+      rotateParam || ''
+    ].join('|');
 
     if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
