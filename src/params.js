@@ -1,6 +1,5 @@
 import { parseSafeUrl } from './urlGuard.js';
 
-// 🛑 SURGICAL FIX: Module-level regex constants prevent V8 recompilation on every request.
 const PROTOCOL_REGEX = /^https?:\/\//i;
 
 const clampInt = (value, fallback, min, max) => {
@@ -29,6 +28,22 @@ const AUTH_PARAMS = [
   'api_key'
 ];
 
+// F12-MODIFIED: raw/bypass removed
+const ALLOWED_MODES = new Set([
+  'auto',
+  'photo',
+  'normal',
+  'manga',
+  'comic',
+  'strip',
+  'webtoon',
+  'manhwa',
+  'manhua'
+]);
+
+// F13-MODIFIED: Safe rotation increments only
+const SAFE_ROTATIONS = new Set([90, 180, 270]);
+
 function parseBoolean(value, defaultValue) {
   if (Array.isArray(value)) {
     value = value[0];
@@ -54,10 +69,13 @@ function parseQuality(q, defaultValue, min, max) {
   return n;
 }
 
-// 🛑 THE TRUE AVIF DICTATOR
-// If the client explicitly begs for JPEG and lacks modern format support, grant it.
-// If the client knows WebP but not AVIF, grant WebP.
-// Everyone else — including */* wildcards, bots, and the unknown — gets AVIF.
+// F13-MODIFIED: Parse safe rotation
+function parseRotation(value) {
+  const n = parseInt(value, 10);
+  if (SAFE_ROTATIONS.has(n)) return n;
+  return 0;
+}
+
 function parseFormat(req) {
   if (parseBoolean(req.query.jpeg, false)) return 'jpeg';
   if (parseBoolean(req.query.avif, false)) return 'avif';
@@ -70,22 +88,15 @@ function parseFormat(req) {
     const wantsAvif = accept.includes('image/avif');
     const isWildcard = !accept || accept === '*/*' || accept.includes('*/*');
 
-    // THE WEAKNESS EXCEPTION: explicitly asked for JPEG, lacks modern taste.
     if (wantsJpeg && !wantsAvif && !wantsWebp && !isWildcard) return 'jpeg';
-
-    // THE MIDDLE-CLASS EXCEPTION: knows WebP but not AVIF.
     if (wantsWebp && !wantsAvif) return 'webp';
 
-    // THE DICTATOR'S DECREE: everyone else gets AVIF shoved down their throat.
     return 'avif';
   }
 
   return 'avif';
 }
 
-// 🛑 BULLETPROOF HIDDEN URL EXTRACTION
-// Parses the RAW query string to prevent Express from shredding unencoded target URLs.
-// Handles both `?api=KEY?url=TARGET` and `?api=KEY/?url=TARGET` formats.
 function extractHiddenUrlFromRaw(req) {
   const rawUrl = req.originalUrl || req.url || '';
   const qIndex = rawUrl.indexOf('?');
@@ -93,16 +104,13 @@ function extractHiddenUrlFromRaw(req) {
 
   const rawQuery = rawUrl.slice(qIndex + 1);
 
-  // Greedy capture: find `url=` and take everything to the end of the query string.
-  // This preserves unencoded query parameters within the target URL.
-  // Assumes `url=` is the last parameter in the query string.
   const match = rawQuery.match(/(?:^|[?&])url=(.+)$/);
 
   if (match) {
     try {
       return decodeURIComponent(match[1]);
     } catch {
-      return match[1]; // If decode fails, use raw value
+      return match[1];
     }
   }
 
@@ -113,14 +121,9 @@ function params(req, res, next) {
   try {
     let { url } = req.query;
 
-    // 🛑 FALLBACK: If Express didn't parse a top-level `url` param,
-    // hunt for the hidden URL in the raw query string.
+    // F16: removed unreachable hiddenUrl === null check
     if (!url) {
       const hiddenUrl = extractHiddenUrlFromRaw(req);
-
-      if (hiddenUrl === null) {
-        return res.status(400).json({ error: 'Malformed URL encoding.' });
-      }
 
       if (hiddenUrl) {
         url = hiddenUrl;
@@ -159,8 +162,6 @@ function params(req, res, next) {
       });
     }
 
-    // 🛑 THE DATA SAVER PROTOCOL
-    // Left unchanged as requested.
     const saveData = ['1', 'true', 'yes', 'on'].includes(
       String(req.headers['save-data'] || req.headers['sec-ch-save-data'] || '').toLowerCase()
     );
@@ -190,11 +191,15 @@ function params(req, res, next) {
         baseStripWidth,
         0,
         4096
-      )
+      ),
+      // F13-MODIFIED: safe rotation
+      rotate: parseRotation(req.query.rotate)
     };
 
-    const modeValue = Array.isArray(req.query.mode) ? req.query.mode[0] : req.query.mode;
-    const mode = String(modeValue || '').toLowerCase();
+    // F12-MODIFIED: Normalize mode, raw/bypass treated as auto
+    const rawMode = Array.isArray(req.query.mode) ? req.query.mode[0] : req.query.mode;
+    const modeInput = String(rawMode || '').toLowerCase();
+    const mode = ALLOWED_MODES.has(modeInput) ? modeInput : 'auto';
 
     let sharpenDefault;
 
@@ -209,9 +214,7 @@ function params(req, res, next) {
       sharpenDefault = true;
     } else if (
       mode === 'photo' ||
-      mode === 'normal' ||
-      mode === 'raw' ||
-      mode === 'bypass'
+      mode === 'normal'
     ) {
       sharpenDefault = false;
     } else {
@@ -232,15 +235,9 @@ function params(req, res, next) {
       req.opts.maxDim = req.opts.maxDim || baseMaxDim;
       req.opts.maxStripWidth = 0;
       if (req.query.sharpen === undefined) req.query.sharpen = '0';
-
-    } else if (mode === 'raw' || mode === 'bypass') {
-      req.opts.maxDim = 0;
-      req.opts.maxStripWidth = 0;
-      req.query.sharpen = '0';
     }
 
-    // FIXED: pass explicit profile and sharpen intent into compress.js.
-    req.opts.mode = mode || 'auto';
+    req.opts.mode = mode;
     req.opts.sharpen = parseBoolean(req.query.sharpen, sharpenDefault);
 
     return next();
