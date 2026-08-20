@@ -1,4 +1,4 @@
-import { createHash, webcrypto } from 'node:crypto';
+import * as crypto from 'node:crypto';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { Readable } from 'node:stream';
 import { request, Agent } from 'undici';
@@ -9,7 +9,8 @@ import shouldCompress from './shouldCompress.js';
 import compress from './compress.js';
 import copyHeaders from './copyHeaders.js';
 
-const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
+const createHash = crypto.createHash;
+const subtle = crypto.webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
 const UPSTREAM_ACCEPT_ENCODING = process.env.UPSTREAM_ACCEPT_ENCODING || 'identity';
 const MAX_DOWNLOAD_BYTES = parseInt(process.env.MAX_DOWNLOAD_BYTES, 10) || (24 * 1024 * 1024);
@@ -19,7 +20,6 @@ const RAW_VAULT_MAX_BYTES = 30 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRY = 5 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRIES = 50;
 
-// 🛑 O(1) LRU VAULT (byte-bounded). Replaces hand-rolled O(N) Map eviction.
 const RAW_VAULT = new LRUCache({
   max: RAW_VAULT_MAX_ENTRIES,
   maxSize: RAW_VAULT_MAX_BYTES,
@@ -35,14 +35,16 @@ function vaultSet(url, raw, etag, lastModified) {
   RAW_VAULT.set(url, { raw, etag, lastModified, size: raw.length });
 }
 
-// 🛑 TLS FINGERPRINT via undici dispatcher (replaces dead https.Agent in got v15).
-// ⚠️ VERSION-UNCERTAIN: `connect.lookup` is HIGH-CONFIDENCE but smoke-test-required.
 const chromeDispatcher = new Agent({
   connect: {
     ciphers: [
-      'TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256',
-      'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256',
-      'ECDHE-ECDSA-AES256-GCM-SHA384', 'ECDHE-RSA-AES256-GCM-SHA384'
+      'TLS_AES_128_GCM_SHA256',
+      'TLS_AES_256_GCM_SHA384',
+      'TLS_CHACHA20_POLY1305_SHA256',
+      'ECDHE-ECDSA-AES128-GCM-SHA256',
+      'ECDHE-RSA-AES128-GCM-SHA256',
+      'ECDHE-ECDSA-AES256-GCM-SHA384',
+      'ECDHE-RSA-AES256-GCM-SHA384'
     ].join(':'),
     minVersion: 'TLSv1.2',
     maxVersion: 'TLSv1.3',
@@ -91,21 +93,80 @@ function bypass(req, res, rawBody, statusCode = 200) {
 
 function detectContentType(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 2) return 'application/octet-stream';
+
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
-  if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
-  if (buffer.length >= 4 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
+
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+
+  if (
+    buffer.length >= 4 &&
+    buffer[0] === 0x47 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x38
+  ) {
+    return 'image/gif';
+  }
+
   if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
-  if (buffer.length >= 6 && buffer[0] === 0x00 && buffer[1] === 0x00 && buffer[2] === 0x01 && buffer[3] === 0x00) return 'image/x-icon';
-  if (buffer.length >= 12 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+
+  if (
+    buffer.length >= 6 &&
+    buffer[0] === 0x00 &&
+    buffer[1] === 0x00 &&
+    buffer[2] === 0x01 &&
+    buffer[3] === 0x00
+  ) {
+    return 'image/x-icon';
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+
   if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = buffer.subarray(8, 12).toString('ascii');
     if (brand === 'avif' || brand === 'avis') return 'image/avif';
   }
+
   return 'application/octet-stream';
 }
 
-// 🛑 FIXED ETag: incorporates upstream identity (ETag/Last-Modified) or content hash,
-// so upstream content changes invalidate the cache. No more permanent stale images.
+async function sha256Hex(data) {
+  const input = Buffer.isBuffer(data) ? data : Buffer.from(data);
+
+  try {
+    if (subtle) {
+      const view = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      const digest = await subtle.digest('SHA-256', view);
+      return Buffer.from(digest).toString('hex');
+    }
+  } catch {
+    // Fall through to synchronous Node crypto.
+  }
+
+  if (typeof crypto.hash === 'function') {
+    return crypto.hash('sha256', input, 'hex');
+  }
+
+  return createHash('sha256').update(input).digest('hex');
+}
+
 async function generateETag(req, targetUrl, upstreamHeaders, body) {
   const paramsFingerprint = JSON.stringify({
     url: targetUrl,
@@ -126,21 +187,14 @@ async function generateETag(req, targetUrl, upstreamHeaders, body) {
 
   if (upstreamEtag || upstreamLM) {
     upstreamIdentity = `${upstreamEtag || ''}|${upstreamLM || ''}|${upstreamLen || ''}`;
-  } else if (subtle) {
-    const digest = await subtle.digest('SHA-256', body);
-    upstreamIdentity = Buffer.from(digest).toString('hex');
   } else {
-    upstreamIdentity = createHash('sha256').update(body).digest('hex');
+    upstreamIdentity = await sha256Hex(body);
   }
 
   const material = Buffer.from(paramsFingerprint + '|' + upstreamIdentity);
+  const digest = await sha256Hex(material);
 
-  if (subtle) {
-    const combined = await subtle.digest('SHA-256', material);
-    return `"${Buffer.from(combined).toString('hex').slice(0, 32)}"`;
-  }
-
-  return `"${createHash('sha256').update(material).digest('hex').slice(0, 32)}"`;
+  return `"${digest.slice(0, 32)}"`;
 }
 
 const MAX_DECOMPRESSED_BYTES = Math.max(MAX_DOWNLOAD_BYTES, 128 * 1024 * 1024);
@@ -184,24 +238,26 @@ async function decompressBody(buffer, encoding) {
   });
 }
 
-// 🛑 STREAMING SIZE GUARD: aborts the moment cumulative bytes exceed the cap.
 async function consumeWithLimit(body) {
   const chunks = [];
   let total = 0;
+
   for await (const chunk of body) {
     total += chunk.length;
+
     if (total > MAX_DOWNLOAD_BYTES) {
       body.destroy();
       const err = new Error('BODY_TOO_LARGE');
       err.code = 'BODY_TOO_LARGE';
       throw err;
     }
+
     chunks.push(chunk);
   }
+
   return Buffer.concat(chunks);
 }
 
-// 🛑 MANUAL REDIRECT WALK with per-hop SSRF validation (undici maxRedirections=0).
 async function safeRequest(url, headers, signal, maxRedirects = 5) {
   let currentUrl = url;
 
@@ -215,12 +271,16 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
     });
 
     if ([301, 302, 303, 307, 308].includes(statusCode)) {
-      await body.dump(); // drain to release the socket
+      await body.dump().catch(() => {});
+
       const location = resHeaders['location'];
+
       if (!location) {
         return { statusCode, headers: resHeaders, body: Buffer.alloc(0) };
       }
+
       let nextUrl;
+
       try {
         nextUrl = new URL(location, currentUrl).href;
       } catch {
@@ -228,11 +288,13 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
         err.code = 'INVALID_REDIRECT';
         throw err;
       }
+
       if (!parseSafeUrl(nextUrl)) {
         const err = new Error('SSRF_BLOCKED_REDIRECT');
         err.code = 'SSRF_BLOCKED_REDIRECT';
         throw err;
       }
+
       currentUrl = nextUrl;
       continue;
     }
@@ -249,7 +311,6 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
 export default async function proxy(req, res) {
   const startTime = Date.now();
 
-  // 🛑 FIXED: graceful 503 under memory pressure instead of process.exit(1) suicide bomb.
   if (process.memoryUsage().heapUsed > 700 * 1024 * 1024) {
     res.setHeader('Retry-After', '10');
     return res.status(503).json({ error: 'Memory pressure. Try again shortly.' });
@@ -257,6 +318,7 @@ export default async function proxy(req, res) {
 
   const abortController = new AbortController();
   let isAborted = false;
+
   res.on('close', () => {
     isAborted = true;
     abortController.abort();
@@ -273,7 +335,10 @@ export default async function proxy(req, res) {
   }
 
   targetUrl = targetUrl.trim();
-  if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
+
+  if (!targetUrl.startsWith('http')) {
+    targetUrl = 'https://' + targetUrl;
+  }
 
   try {
     targetUrl = new URL(targetUrl).href;
@@ -283,14 +348,20 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
-  const queryReferer = Array.isArray(req.query?.referer) ? req.query.referer[0] : req.query?.referer;
+  const queryReferer = Array.isArray(req.query?.referer)
+    ? req.query.referer[0]
+    : req.query?.referer;
+
   let autoReferer = '';
+
   try {
     const parsedTarget = new URL(targetUrl);
     autoReferer = parsedTarget.origin;
   } catch {}
 
-  const finalReferer = (queryReferer && typeof queryReferer === 'string') ? queryReferer : autoReferer;
+  const finalReferer = (queryReferer && typeof queryReferer === 'string')
+    ? queryReferer
+    : autoReferer;
 
   const headers = {
     'user-agent': userAgent || getRandomUA(),
@@ -307,12 +378,14 @@ export default async function proxy(req, res) {
   };
 
   const vaultEntry = vaultGet(targetUrl);
+
   if (vaultEntry) {
     if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
     if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
   }
 
   let workerBase = process.env.CF_WORKER_URL || '';
+
   if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
   if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
   if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
@@ -323,6 +396,7 @@ export default async function proxy(req, res) {
 
   if (workerBase && workerBase.startsWith('https://')) {
     const internalKey = process.env.INTERNAL_KEY;
+
     if (internalKey) {
       isWorkerFetch = true;
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
@@ -350,6 +424,7 @@ export default async function proxy(req, res) {
     if (isWorkerFetch) {
       activeUrl = targetUrl;
       activeHeaders = headers;
+
       try {
         response = await safeRequest(activeUrl, activeHeaders, abortController.signal);
         statusCode = response.statusCode;
@@ -365,6 +440,7 @@ export default async function proxy(req, res) {
 
   if (statusCode === 403) {
     const retryHeaders = { ...activeHeaders, 'user-agent': getRandomUA() };
+
     try {
       response = await safeRequest(activeUrl, retryHeaders, abortController.signal);
       statusCode = response.statusCode;
@@ -382,8 +458,9 @@ export default async function proxy(req, res) {
       res.setHeader('X-Conditional-Fetch', '304_VAULT_HIT');
     } else {
       rawBody = toBuffer(response.body);
-      // 🛑 Decompress if upstream ignored Accept-Encoding: identity (zip-bomb guarded below).
+
       const encoding = responseHeaders?.['content-encoding'];
+
       if (encoding) {
         try {
           rawBody = await decompressBody(rawBody, encoding);
@@ -393,7 +470,6 @@ export default async function proxy(req, res) {
       }
     }
 
-    // 🛑 ZIP-BOMB / POST-DECOMPRESSION SIZE GUARD
     if (rawBody.length > MAX_DOWNLOAD_BYTES) {
       return sendGhost(res, 3600);
     }
@@ -401,6 +477,7 @@ export default async function proxy(req, res) {
     if (statusCode === 200 && rawBody.length <= RAW_VAULT_MAX_ENTRY) {
       const upstreamEtag = responseHeaders['etag'] || null;
       const upstreamLastModified = responseHeaders['last-modified'] || null;
+
       if (upstreamEtag || upstreamLastModified) {
         vaultSet(targetUrl, rawBody, upstreamEtag, upstreamLastModified);
       }
@@ -408,8 +485,10 @@ export default async function proxy(req, res) {
 
     const upstreamCacheControl = responseHeaders['cache-control'] || '';
     const maxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
+
     if (maxAgeMatch) {
       const upstreamMaxAge = parseInt(maxAgeMatch[1], 10);
+
       if (!Number.isNaN(upstreamMaxAge) && upstreamMaxAge > 0) {
         responseHeaders['x-upstream-max-age'] = String(upstreamMaxAge);
       }
@@ -436,6 +515,7 @@ export default async function proxy(req, res) {
     if (req.query?.debug === '1') {
       try {
         const metadata = await sharp(rawBody).metadata();
+
         const report = {
           status: statusCode,
           originType: detectedType,
@@ -452,14 +532,18 @@ export default async function proxy(req, res) {
           upstreamCacheControl,
           executionTimeMs: Date.now() - startTime
         };
+
         return res.status(200).json(report);
       } catch (err) {
-        return res.status(500).json({ error: 'Debug analysis failed', message: err.message });
+        return res.status(500).json({
+          error: 'Debug analysis failed',
+          message: String(err?.message || err)
+        });
       }
     }
 
-    // 🛑 FIXED ETag: now content-aware. Upstream changes invalidate the cache.
     const etag = await generateETag(req, targetUrl, responseHeaders, rawBody);
+
     if (req.headers['if-none-match'] === etag) {
       res.setHeader('ETag', etag);
       return res.status(304).end();
@@ -469,8 +553,8 @@ export default async function proxy(req, res) {
     delete responseHeaders['content-length'];
 
     copyHeaders({ headers: responseHeaders, status: statusCode }, res);
-    res.setHeader('Content-Type', detectedType);
 
+    res.setHeader('Content-Type', detectedType);
     res.setHeader('x-upstream-content-length', String(rawBody.length));
     res.setHeader('ETag', etag);
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
@@ -488,7 +572,6 @@ export default async function proxy(req, res) {
     if (shouldCompress(req, rawBody)) {
       const compressedResult = await compress(req, res, rawBody);
 
-      // 🛑 SURVIVAL PATCH: close the socket if compress streamed nothing back.
       if (!res.writableEnded) {
         if (compressedResult && compressedResult.length > 0) {
           res.end(compressedResult);
@@ -496,11 +579,11 @@ export default async function proxy(req, res) {
           res.end();
         }
       }
+
       return;
     }
 
     return bypass(req, res, rawBody, statusCode);
-
   } catch (error) {
     if (isAborted) return;
 
@@ -517,7 +600,12 @@ export default async function proxy(req, res) {
       return sendGhost(res, 86400);
     }
 
-    if (code === 'ETIMEDOUT' || code === 'ERR_GOT_REQUEST_TIMEOUT' || code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT') {
+    if (
+      code === 'ETIMEDOUT' ||
+      code === 'ERR_GOT_REQUEST_TIMEOUT' ||
+      code === 'UND_ERR_HEADERS_TIMEOUT' ||
+      code === 'UND_ERR_BODY_TIMEOUT'
+    ) {
       return sendGhost(res, 60);
     }
 
