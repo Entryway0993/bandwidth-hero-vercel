@@ -6,6 +6,7 @@ import memoryGovernor from './memoryGovernor.js';
 
 const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
+const SHARP_HARD_TIMEOUT_MS = parseInt(process.env.SHARP_HARD_TIMEOUT_MS, 10) || 30000;
 const SHARP_CACHE_MEMORY_MB = parseInt(process.env.SHARP_CACHE_MEMORY_MB, 10) || 350;
 sharp.cache({ memory: SHARP_CACHE_MEMORY_MB, files: 0, items: 100 });
 
@@ -691,6 +692,11 @@ export default async function compress(req, res, buffer, governor) {
 
   const abortController = new AbortController();
   const { signal } = abortController;
+
+  const timeoutHandle = setTimeout(() => {
+  clientDisconnected = true;
+  abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
+}, SHARP_HARD_TIMEOUT_MS);
 
   let clientDisconnected = false;
 
@@ -1522,6 +1528,8 @@ export default async function compress(req, res, buffer, governor) {
     } else {
       req.socket?.destroy();
     }
+
+    if (timeoutHandle) clearTimeout(timeoutHandle);
 
     return null;
   } finally {
