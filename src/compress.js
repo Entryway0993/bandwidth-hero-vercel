@@ -927,8 +927,10 @@ export default async function compress(req, res, buffer) {
     }
 
     const exactHash = await generateExactHash(buffer);
-    if (exactHash) {
-      const exactHit = exactCache.get(exactHash);
+    const exactKey = exactHash ? `${exactHash}:${paramFingerprint}` : null;
+
+    if (exactKey) {
+      const exactHit = exactCache.get(exactKey);
 
       if (exactHit) {
         res.setHeader('X-Exact-Cache', 'HIT');
@@ -952,7 +954,7 @@ export default async function compress(req, res, buffer) {
 
     let thumbResult = null;
 
-    if (ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) {
+    if ((ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) && allowEnhancements) {
       thumbResult = await generatePlaceholderAndPalette(buffer);
 
       if (ENABLE_VOID_WATCHER && thumbResult.isVoid) {
@@ -975,7 +977,8 @@ export default async function compress(req, res, buffer) {
     }
 
     const pHash = await generatePerceptualHash(buffer);
-    const cachedResult = pHash ? perceptualCache.get(pHash) : null;
+    const pKey = pHash ? `${pHash}:${paramFingerprint}` : null;
+    const cachedResult = pKey ? perceptualCache.get(pKey) : null;
 
     if (cachedResult) {
       res.setHeader('X-Perceptual-Cache', 'HIT');
@@ -1043,7 +1046,7 @@ export default async function compress(req, res, buffer) {
 
       let skewAngle = 0;
 
-      if (ENABLE_DESKEW && !analysis.isMangaStrip) {
+      if (ENABLE_DESKEW && allowEnhancements && !isStripMode && !analysis.isMangaStrip) {
         skewAngle = await detectSkew(buffer);
 
         if (skewAngle !== 0) {
@@ -1060,19 +1063,19 @@ export default async function compress(req, res, buffer) {
 
       let judgeResult = null;
 
-      if (ENABLE_JUDGE) {
+      if (ENABLE_JUDGE && allowEnhancements) {
         judgeResult = judgeQuality(analysis, metadata);
       }
 
       let halftoneResult = null;
 
-      if (ENABLE_MOIRE) {
+      if (ENABLE_MOIRE && allowEnhancements && !isStripMode) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
 
       let lineArtResult = null;
 
-      if (ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) {
+      if ((ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) && allowLineArtFilters) {
         lineArtResult = await detectLineArt(buffer, analysis);
       }
 
@@ -1147,15 +1150,31 @@ export default async function compress(req, res, buffer) {
 
       let ditherAssassinActive = false;
 
-      if (ENABLE_DITHER_ASSASSIN && lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !isAnimated) {
+      if (
+        ENABLE_DITHER_ASSASSIN &&
+        allowLineArtFilters &&
+        lineArtResult &&
+        lineArtResult.isLineArt &&
+        lineArtResult.confidence > 0.85 &&
+        !isAnimated
+      ) {
         ditherAssassinActive = true;
         recordMetric('ditherAssassin');
       }
 
       let bandingExorcistActive = false;
 
-      if (ENABLE_BANDING_EXORCIST && !ditherAssassinActive && !isAnimated) {
-        if (analysis.stdevLuminance > 20 && analysis.stdevLuminance < 50 && analysis.sharpness < 30) {
+      if (
+        ENABLE_BANDING_EXORCIST &&
+        allowPhotoFilters &&
+        !ditherAssassinActive &&
+        !isAnimated
+      ) {
+        if (
+          analysis.stdevLuminance > 20 &&
+          analysis.stdevLuminance < 50 &&
+          analysis.sharpness < 30
+        ) {
           bandingExorcistActive = true;
           recordMetric('bandingExorcist');
         }
@@ -1190,7 +1209,7 @@ export default async function compress(req, res, buffer) {
         pipeline = pipeline.grayscale();
       }
 
-      if (ENABLE_LUMINANCE && !isAnimated && !ditherAssassinActive) {
+      if (ENABLE_LUMINANCE && allowPhotoFilters && !isAnimated && !ditherAssassinActive) {
         if (analysis.meanLuminance < 85 && analysis.stdevLuminance < 50) {
           pipeline = pipeline.gamma(1.4);
           res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
@@ -1202,7 +1221,7 @@ export default async function compress(req, res, buffer) {
         }
       }
 
-      if (ENABLE_GHOST_STRIPPER && !isAnimated && !ditherAssassinActive) {
+      if (ENABLE_GHOST_STRIPPER && allowPhotoFilters && !isAnimated && !ditherAssassinActive) {
         if (analysis.meanLuminance > 150 && analysis.maxLuminance > 200 && analysis.maxLuminance < 253) {
           const stretch = 255 / analysis.maxLuminance;
           pipeline = pipeline.linear(stretch, 0);
@@ -1211,25 +1230,43 @@ export default async function compress(req, res, buffer) {
         }
       }
 
-      if (ENABLE_DESKEW && skewAngle !== 0) {
+      if (ENABLE_DESKEW && allowEnhancements && skewAngle !== 0) {
         pipeline = pipeline.rotate(skewAngle, {
           background: analysis.isGrayscale ? { r: 255, g: 255, b: 255 } : { r: 255, g: 255, b: 255, alpha: 0 },
         });
       }
 
-      if (halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
+      if (
+        allowEnhancements &&
+        halftoneResult &&
+        halftoneResult.isHalftone &&
+        halftoneResult.confidence > 0.85
+      ) {
         pipeline = pipeline.median(3);
         res.setHeader('X-Moire-Removed', 'true');
         recordMetric('moireRemoval');
       }
 
-      if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85 && !ditherAssassinActive) {
+      if (
+        allowLineArtFilters &&
+        lineArtResult &&
+        lineArtResult.isLineArt &&
+        lineArtResult.confidence > 0.85 &&
+        !ditherAssassinActive
+      ) {
         pipeline = pipeline.median(3);
-        pipeline = pipeline.sharpen({
-          sigma: 0.6,
-          flat: 3.0,
-          jagged: 1.5,
-        });
+
+        if (sharpenPreference !== false) {
+          pipeline = pipeline.sharpen({
+            sigma: 0.6,
+            flat: 3.0,
+            jagged: 1.5,
+          });
+        }
+
+        res.setHeader('X-Line-Denoise', 'true');
+        recordMetric('lineDenoise');
+      }
 
         res.setHeader('X-Line-Denoise', 'true');
         recordMetric('lineDenoise');
@@ -1287,8 +1324,21 @@ export default async function compress(req, res, buffer) {
         });
       }
 
-      if (analysis.sharpness < 50 && !analysis.isMangaStrip && !ditherAssassinActive) {
-        const alreadySharpened = lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85;
+      const contentWantsSharpen =
+        sharpenPreference !== false &&
+        analysis.sharpness < 50 &&
+        !analysis.isMangaStrip;
+
+      if (
+        allowEnhancements &&
+        (sharpenPreference === true || contentWantsSharpen) &&
+        !ditherAssassinActive
+      ) {
+        const alreadySharpened =
+          allowLineArtFilters &&
+          lineArtResult &&
+          lineArtResult.isLineArt &&
+          lineArtResult.confidence > 0.85;
 
         if (!alreadySharpened) {
           pipeline = pipeline.sharpen({
@@ -1473,7 +1523,7 @@ export default async function compress(req, res, buffer) {
             break;
 
           case 'png': {
-            const useQuantumSorcerer = ENABLE_QUANTUM_SORCERER && (
+            const useQuantumSorcerer = ENABLE_QUANTUM_SORCERER && allowLineArtFilters && (
               analysis.entropy < 6.0 ||
               (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.7) ||
               analysis.isMangaPage ||
@@ -1609,8 +1659,8 @@ export default async function compress(req, res, buffer) {
         palette: palette,
       };
 
-      if (exactHash) exactCache.set(exactHash, cacheEntry);
-      if (pHash) perceptualCache.set(pHash, cacheEntry);
+      if (exactKey) exactCache.set(exactKey, cacheEntry);
+      if (pKey) perceptualCache.set(pKey, cacheEntry);
 
       res.setHeader('X-Perceptual-Cache', 'MISS');
       res.setHeader('X-Encode-Quality', String(quality));
