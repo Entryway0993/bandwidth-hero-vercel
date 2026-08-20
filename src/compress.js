@@ -693,11 +693,6 @@ export default async function compress(req, res, buffer, governor) {
   const abortController = new AbortController();
   const { signal } = abortController;
 
-  const timeoutHandle = setTimeout(() => {
-  clientDisconnected = true;
-  abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
-}, SHARP_HARD_TIMEOUT_MS);
-
   let clientDisconnected = false;
 
   if (ENABLE_TIMEOUT_GUILLOTINE) {
@@ -711,6 +706,11 @@ export default async function compress(req, res, buffer, governor) {
       abortController.abort();
     });
   }
+
+  const timeoutHandle = setTimeout(() => {
+  clientDisconnected = true;
+  abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
+}, SHARP_HARD_TIMEOUT_MS);
 
   let totalPixelCost = 0;
 
