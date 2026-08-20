@@ -30,6 +30,10 @@ const AUTH_PARAMS = [
 ];
 
 function parseBoolean(value, defaultValue) {
+  if (Array.isArray(value)) {
+    value = value[0];
+  }
+
   if (value === undefined) return defaultValue;
 
   const str = String(value).trim().toLowerCase();
@@ -155,8 +159,8 @@ function params(req, res, next) {
       });
     }
 
-    // 🛑 THE DATA SAVER PROTOCOL (Android Automation)
-    // Reads the standard Save-Data header sent by your Samsung Galaxy A73.
+    // 🛑 THE DATA SAVER PROTOCOL
+    // Left unchanged as requested.
     const saveData = ['1', 'true', 'yes', 'on'].includes(
       String(req.headers['save-data'] || req.headers['sec-ch-save-data'] || '').toLowerCase()
     );
@@ -189,7 +193,30 @@ function params(req, res, next) {
       )
     };
 
-    const mode = String(req.query.mode || '').toLowerCase();
+    const modeValue = Array.isArray(req.query.mode) ? req.query.mode[0] : req.query.mode;
+    const mode = String(modeValue || '').toLowerCase();
+
+    let sharpenDefault;
+
+    if (
+      mode === 'manga' ||
+      mode === 'comic' ||
+      mode === 'strip' ||
+      mode === 'webtoon' ||
+      mode === 'manhwa' ||
+      mode === 'manhua'
+    ) {
+      sharpenDefault = true;
+    } else if (
+      mode === 'photo' ||
+      mode === 'normal' ||
+      mode === 'raw' ||
+      mode === 'bypass'
+    ) {
+      sharpenDefault = false;
+    } else {
+      sharpenDefault = undefined;
+    }
 
     if (mode === 'manga' || mode === 'comic') {
       req.opts.maxDim = req.opts.maxDim || baseMaxDim;
@@ -212,9 +239,14 @@ function params(req, res, next) {
       req.query.sharpen = '0';
     }
 
+    // FIXED: pass explicit profile and sharpen intent into compress.js.
+    req.opts.mode = mode || 'auto';
+    req.opts.sharpen = parseBoolean(req.query.sharpen, sharpenDefault);
+
     return next();
   } catch (err) {
-    console.error('[Params Middleware Error]', err);
+    const safeMessage = err?.message ? String(err.message).split('?')[0] : 'Unknown error';
+    console.error('[Params Middleware Error]', safeMessage);
 
     if (!res.headersSent) {
       res.status(500).json({
