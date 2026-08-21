@@ -230,9 +230,9 @@ function getColdStartEffort(pixelCount, outputFormat) {
     if (mp <= 4)   return 6;
     if (mp <= 6)   return 6;
     if (mp <= 8)   return 4;
-    if (mp <= 10)  return 4;
-    if (mp <= 12)  return 4;
-    if (mp <= 15)  return 4;
+    if (mp <= 10)  return 3;
+    if (mp <= 12)  return 3;
+    if (mp <= 15)  return 3;
     if (mp <= 18)  return 3;
     if (mp <= 22)  return 3;
     if (mp <= 30)  return 3;
