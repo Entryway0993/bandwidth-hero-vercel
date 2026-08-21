@@ -224,12 +224,11 @@ function getColdStartEffort(pixelCount, outputFormat) {
   const mp = pixelCount / 1_000_000;
 
   if (outputFormat === 'avif') {
-    if (mp <= 1) return 6;
-    if (mp <= 3) return 5;
-    if (mp <= 8) return 4;
-    if (mp <= 20) return 3;
-    if (mp <= 50) return 2;
-    return 2;
+    if (mp <= 2) return 7;
+    if (mp <= 5) return 6;
+    if (mp <= 15) return 5;
+    if (mp <= 30) return 4;
+    return 3; // Never drop to 2 on cold start; AVIF effort 2 is visually degraded
   }
 
   if (outputFormat === 'webp') {
@@ -244,6 +243,7 @@ function getColdStartEffort(pixelCount, outputFormat) {
 
 function getChronosState(pixelCount, outputFormat) {
   const samples = rollingByFormat[outputFormat] || [];
+  const mp = pixelCount / 1_000_000;
 
   if (samples.length < 3) {
     return {
@@ -254,15 +254,31 @@ function getChronosState(pixelCount, outputFormat) {
 
   const avg = getAverageMsPerMegapixel(outputFormat);
 
-  if (avg < 40) return { state: 'FAST', effort: 9 };
-  if (avg < 80) return { state: 'SWIFT', effort: 8 };
-  if (avg < 150) return { state: 'NORMAL', effort: 7 };
-  if (avg < 250) return { state: 'LIGHT', effort: 6 };
-  if (avg < 400) return { state: 'MODERATE', effort: 5 };
-  if (avg < 700) return { state: 'HEAVY', effort: 4 };
-  if (avg < 1200) return { state: 'SEVERE', effort: 3 };
+  // AVIF (libaom) is inherently slow. Thresholds reflect real-world AV1 encoding.
+  if (outputFormat === 'avif') {
+    if (avg < 300) return { state: 'FAST', effort: 9 };
+    if (avg < 600) return { state: 'SWIFT', effort: 8 };
+    if (avg < 1200) return { state: 'NORMAL', effort: 7 };
+    if (avg < 2500) return { state: 'LIGHT', effort: 6 };
+    if (avg < 5000) return { state: 'MODERATE', effort: 5 };
+    if (avg < 8000) return { state: 'HEAVY', effort: 4 };
+    if (avg < 12000) return { state: 'SEVERE', effort: 3 };
+    return { state: 'CRITICAL', effort: 2 };
+  }
 
-  return { state: 'CRITICAL', effort: 2 };
+  // WebP (libwebp) is much faster.
+  if (outputFormat === 'webp') {
+    if (avg < 20) return { state: 'FAST', effort: 6 }; // WebP max effort is 6
+    if (avg < 50) return { state: 'SWIFT', effort: 6 };
+    if (avg < 100) return { state: 'NORMAL', effort: 5 };
+    if (avg < 200) return { state: 'LIGHT', effort: 5 };
+    if (avg < 400) return { state: 'MODERATE', effort: 4 };
+    if (avg < 800) return { state: 'HEAVY', effort: 3 };
+    return { state: 'SEVERE', effort: 2 };
+  }
+
+  // Fallback
+  return { state: 'NORMAL', effort: 4 };
 }
 
 // ============================================================
