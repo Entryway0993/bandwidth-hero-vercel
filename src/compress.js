@@ -6,7 +6,6 @@ import memoryGovernor from './memoryGovernor.js';
 
 const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
-const SHARP_HARD_TIMEOUT_MS = parseInt(process.env.SHARP_HARD_TIMEOUT_MS, 10) || 30000;
 const SHARP_CACHE_MEMORY_MB = parseInt(process.env.SHARP_CACHE_MEMORY_MB, 10) || 350;
 sharp.cache({ memory: SHARP_CACHE_MEMORY_MB, files: 0, items: 100 });
 
@@ -30,6 +29,7 @@ const MAX_ANIMATION_FRAMES = parseInt(process.env.MAX_ANIMATION_FRAMES) || 300;
 const VIEWPORT_FALLBACK = parseInt(process.env.VIEWPORT_FALLBACK) || 1080;
 const HEALTH_LAG_THRESHOLD = parseInt(process.env.HEALTH_LAG_THRESHOLD) || 100;
 const SHUTDOWN_TIMEOUT = parseInt(process.env.SHUTDOWN_TIMEOUT) || 10000;
+const SHARP_HARD_TIMEOUT_MS = parseInt(process.env.SHARP_HARD_TIMEOUT_MS, 10) || 30000;
 
 const metrics = {
   startTime: Date.now(),
@@ -166,6 +166,55 @@ const exactCache = new LRUCache({
   sizeCalculation: (entry) => entry.buffer.length
 });
 
+// ============================================================
+// CHRONOS ADAPTIVE EFFORT (restored — no static ceiling)
+// ============================================================
+
+const CHRONOS_WINDOW = 10;
+const rollingEncodeTimes = [];
+
+function recordEncodeTime(ms) {
+  rollingEncodeTimes.push(ms);
+  if (rollingEncodeTimes.length > CHRONOS_WINDOW) {
+    rollingEncodeTimes.shift();
+  }
+}
+
+function getAverageEncodeTime() {
+  if (rollingEncodeTimes.length === 0) return 0;
+  return rollingEncodeTimes.reduce((a, b) => a + b, 0) / rollingEncodeTimes.length;
+}
+
+function getChronosState(pixelCount) {
+  const avg = getAverageEncodeTime();
+
+  // Cold start: no history, full power
+  if (rollingEncodeTimes.length < 3) {
+    return { state: 'COLD', effort: 9 };
+  }
+
+  const millions = pixelCount / 1_000_000;
+  const msPerMegapixel = avg / Math.max(millions, 0.1);
+
+  if (msPerMegapixel > 800) return { state: 'CRITICAL', effort: 2 };
+  if (msPerMegapixel > 500) return { state: 'SEVERE', effort: 3 };
+  if (msPerMegapixel > 300) return { state: 'HEAVY', effort: 4 };
+  if (msPerMegapixel > 200) return { state: 'MODERATE', effort: 5 };
+  if (msPerMegapixel > 120) return { state: 'LIGHT', effort: 6 };
+  if (msPerMegapixel > 60) return { state: 'EASY', effort: 7 };
+  return { state: 'NORMAL', effort: 8 };
+}
+
+// ============================================================
+// FEATURE FLAGS
+// ============================================================
+
+function envBool(name, fallback = false) {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
 const ENABLE_AVIF = envBool('ENABLE_AVIF', true);
 const ENABLE_WEBP = envBool('ENABLE_WEBP', true);
 const FORCE_JPEG = envBool('FORCE_JPEG', false);
@@ -196,12 +245,6 @@ const ENABLE_QUANTUM_SORCERER = envBool('ENABLE_QUANTUM_SORCERER', true);
 const ENABLE_ORACLE_LEDGER = envBool('ENABLE_ORACLE_LEDGER', true);
 const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
 
-function envBool(name, fallback = false) {
-  const v = process.env[name];
-  if (v === undefined) return fallback;
-  return v === '1' || v === 'true' || v === 'yes';
-}
-
 function parseTriState(value, defaultValue) {
   if (Array.isArray(value)) {
     value = value[0];
@@ -216,6 +259,10 @@ function parseTriState(value, defaultValue) {
 
   return defaultValue;
 }
+
+// ============================================================
+// IMAGE ANALYSIS HELPERS
+// ============================================================
 
 async function generatePlaceholderAndPalette(buffer) {
   try {
@@ -458,7 +505,7 @@ function judgeQuality(analysis, metadata) {
   else { grade = 'F'; qualityAdjust = 15; }
 
   return { grade, qualityAdjust, score };
-}
+    }
 
 async function detectHalftone(buffer, metadata, analysis) {
   if (analysis.colorVariance > 50) {
@@ -672,6 +719,10 @@ function getChromaSubsampling(analysis) {
   return '4:2:0';
 }
 
+// ============================================================
+// MAIN COMPRESS FUNCTION
+// ============================================================
+
 export default async function compress(req, res, buffer, governor) {
   const memGov = governor || memoryGovernor;
   const reqId = req.id || 'unknown';
@@ -695,22 +746,23 @@ export default async function compress(req, res, buffer, governor) {
 
   let clientDisconnected = false;
 
+  // Sharp hard timeout guillotine
+  const timeoutHandle = setTimeout(() => {
+    clientDisconnected = true;
+    abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
+  }, SHARP_HARD_TIMEOUT_MS);
+
   if (ENABLE_TIMEOUT_GUILLOTINE) {
     req.on('close', () => {
       clientDisconnected = true;
-      abortController.abort();
+      abortController.abort(new Error('CLIENT_DISCONNECT'));
     });
 
     res.on('close', () => {
       clientDisconnected = true;
-      abortController.abort();
+      abortController.abort(new Error('RESPONSE_CLOSED'));
     });
   }
-
-  const timeoutHandle = setTimeout(() => {
-  clientDisconnected = true;
-  abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
-}, SHARP_HARD_TIMEOUT_MS);
 
   let totalPixelCost = 0;
 
@@ -835,12 +887,6 @@ export default async function compress(req, res, buffer, governor) {
       metrics.cacheMisses++;
     }
 
-    if (signal.aborted) {
-      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-      res.status(499);
-      return Buffer.alloc(0);
-    }
-
     // F2-ADAPTIVE: Memory governor pixel admission
     const frames = metadata.pages || 1;
     const width = metadata.width || 0;
@@ -928,18 +974,12 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
-      // F2-ADAPTIVE: Effort based on pixel count
-      const millions = totalPixelCost / 1_000_000;
-      let effort;
+      // CHRONOS ADAPTIVE EFFORT: no static ceiling
+      const chronos = getChronosState(totalPixelCost);
+      const effort = chronos.effort;
 
-      if (millions > 80) effort = 2;
-      else if (millions > 50) effort = 3;
-      else if (millions > 30) effort = 4;
-      else if (millions > 15) effort = 5;
-      else if (millions > 8) effort = 6;
-      else if (millions > 4) effort = 7;
-      else if (millions > 2) effort = 8;
-      else effort = 9;
+      res.setHeader('X-Chronos-State', chronos.state);
+      res.setHeader('X-Chronos-Effort', String(effort));
 
       const requestedFormat = req.opts?.format || req.query.f || req.query.format;
       let outputFormat = 'jpeg';
@@ -1078,7 +1118,7 @@ export default async function compress(req, res, buffer, governor) {
         recordMetric('moireRemoval');
       }
 
-      // F1: Fixed — removed duplicate X-Line-Denoise block
+      // F1: Fixed — single X-Line-Denoise block, no duplicate
       if (
         allowLineArtFilters &&
         lineArtResult &&
@@ -1292,6 +1332,9 @@ export default async function compress(req, res, buffer, governor) {
         const encodeEnd = Date.now();
         const encodeTime = encodeEnd - encodeStart;
 
+        // Chronos: record encode time for adaptive effort
+        recordEncodeTime(encodeTime);
+
         res.setHeader('X-Processing-Time', `${encodeTime}ms`);
 
         if (ENABLE_ORACLE_LEDGER) {
@@ -1415,6 +1458,9 @@ export default async function compress(req, res, buffer, governor) {
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
+      // Chronos: record encode time for adaptive effort
+      recordEncodeTime(encodeTime);
+
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
       res.setHeader('X-Encode-Effort', String(effort));
 
@@ -1529,10 +1575,9 @@ export default async function compress(req, res, buffer, governor) {
       req.socket?.destroy();
     }
 
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-
     return null;
   } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
     activeRequests--;
   }
     }
