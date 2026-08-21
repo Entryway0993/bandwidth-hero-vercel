@@ -224,18 +224,35 @@ function getColdStartEffort(pixelCount, outputFormat) {
   const mp = pixelCount / 1_000_000;
 
   if (outputFormat === 'avif') {
-    if (mp <= 2) return 7;
-    if (mp <= 5) return 5;
-    if (mp <= 15) return 4;
-    if (mp <= 30) return 3;
-    return 3; // Never drop to 2 on cold start; AVIF effort 2 is visually degraded
+    if (mp <= 1)   return 8;
+    if (mp <= 2)   return 7;
+    if (mp <= 3)   return 7;
+    if (mp <= 4)   return 6;
+    if (mp <= 6)   return 6;
+    if (mp <= 8)   return 5;
+    if (mp <= 10)  return 5;
+    if (mp <= 12)  return 4;
+    if (mp <= 15)  return 4;
+    if (mp <= 18)  return 3;
+    if (mp <= 22)  return 3;
+    if (mp <= 30)  return 3;
+    if (mp <= 40)  return 2;
+    if (mp <= 50)  return 2;
+    return 2;
   }
 
   if (outputFormat === 'webp') {
-    if (mp <= 2) return 6;
-    if (mp <= 8) return 5;
-    if (mp <= 20) return 4;
-    return 3;
+    if (mp <= 1)   return 6;
+    if (mp <= 2)   return 6;
+    if (mp <= 4)   return 6;
+    if (mp <= 6)   return 5;
+    if (mp <= 8)   return 5;
+    if (mp <= 10)  return 5;
+    if (mp <= 15)  return 4;
+    if (mp <= 20)  return 4;
+    if (mp <= 30)  return 3;
+    if (mp <= 40)  return 3;
+    return 2;
   }
 
   return 4;
