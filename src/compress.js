@@ -1,12 +1,21 @@
 import sharp from 'sharp';
 import { createHash, webcrypto } from 'node:crypto';
-import { PassThrough } from 'node:stream';
 import { LRUCache } from 'lru-cache';
 import memoryGovernor from './memoryGovernor.js';
 
 const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
-const SHARP_CACHE_MEMORY_MB = parseInt(process.env.SHARP_CACHE_MEMORY_MB, 10) || 350;
+function safeInt(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function safeFloat(value, fallback) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const SHARP_CACHE_MEMORY_MB = safeInt(process.env.SHARP_CACHE_MEMORY_MB, 350);
 sharp.cache({ memory: SHARP_CACHE_MEMORY_MB, files: 0, items: 100 });
 
 async function generateExactHash(buffer) {
@@ -22,14 +31,18 @@ async function generateExactHash(buffer) {
   }
 }
 
-const MAX_OUTPUT_DIM = parseInt(process.env.MAX_OUTPUT_DIM) || 2048;
-const DEFAULT_QUALITY = parseInt(process.env.DEFAULT_QUALITY) || 75;
-const MAX_STRIP_WIDTH = parseInt(process.env.MAX_STRIP_WIDTH) || 1200;
-const MAX_ANIMATION_FRAMES = parseInt(process.env.MAX_ANIMATION_FRAMES) || 300;
-const VIEWPORT_FALLBACK = parseInt(process.env.VIEWPORT_FALLBACK) || 1080;
-const HEALTH_LAG_THRESHOLD = parseInt(process.env.HEALTH_LAG_THRESHOLD) || 100;
-const SHUTDOWN_TIMEOUT = parseInt(process.env.SHUTDOWN_TIMEOUT) || 10000;
-const SHARP_HARD_TIMEOUT_MS = parseInt(process.env.SHARP_HARD_TIMEOUT_MS, 10) || 30000;
+const MAX_OUTPUT_DIM = safeInt(process.env.MAX_OUTPUT_DIM, 2560);
+const DEFAULT_QUALITY = safeInt(process.env.DEFAULT_QUALITY, 55);
+const MAX_STRIP_WIDTH = safeInt(process.env.MAX_STRIP_WIDTH, 1600);
+const MAX_ANIMATION_FRAMES = safeInt(process.env.MAX_ANIMATION_FRAMES, 300);
+const VIEWPORT_FALLBACK = safeInt(process.env.VIEWPORT_FALLBACK, 1080);
+const HEALTH_LAG_THRESHOLD = safeInt(process.env.HEALTH_LAG_THRESHOLD, 100);
+const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
+const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 30000);
+
+// Sharp AVIF hard limit is UNKNOWN, so these are conservative safety limits.
+const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 25_000_000);
+const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 8192);
 
 const metrics = {
   startTime: Date.now(),
@@ -44,20 +57,20 @@ const metrics = {
   memoryRejections: 0,
   voidDetections: 0,
   encodingFailures: 0,
-  formatCounts: { avif: 0, webp: 0, jpeg: 0, png: 0 },
+  formatCounts: {
+    avif: 0,
+    webp: 0,
+    jpeg: 0
+  },
   featureActivations: {
-    ditherAssassin: 0,
-    bandingExorcist: 0,
+    deskew: 0,
+    alphaSentinel: 0,
     moireRemoval: 0,
     lineDenoise: 0,
     luminanceFix: 0,
     ghostStripper: 0,
-    deskew: 0,
-    alphaSentinel: 0,
-    quantumSorcerer: 0,
-    formatDuelist: 0,
-    metadataReaper: 0,
-    streamReaper: 0
+    bandingExorcist: 0,
+    metadataReaper: 0
   }
 };
 
@@ -73,12 +86,15 @@ function recordMetric(key, value = 1) {
 
 export function getMetrics() {
   const uptime = Date.now() - metrics.startTime;
+
   const avgEncodeTime = metrics.encodeCount > 0
     ? Math.round(metrics.totalEncodeTime / metrics.encodeCount)
     : 0;
+
   const cacheHitRate = metrics.totalRequests > 0
     ? ((metrics.cacheHits / metrics.totalRequests) * 100).toFixed(2) + '%'
     : '0%';
+
   const compressionRatio = metrics.totalBytesIn > 0
     ? ((1 - metrics.totalBytesOut / metrics.totalBytesIn) * 100).toFixed(2) + '%'
     : '0%';
@@ -99,8 +115,8 @@ export function getMetrics() {
     encodingFailures: metrics.encodingFailures,
     formatCounts: metrics.formatCounts,
     featureActivations: metrics.featureActivations,
-    activeEncodes,
     activeRequests,
+    activeEncodes,
     isShuttingDown,
     memoryGovernor: {
       rssMB: memoryGovernor.getRssMB(),
@@ -115,9 +131,11 @@ export function getMetrics() {
 export function checkHealth() {
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
+
     setImmediate(() => {
       const lag = Number(process.hrtime.bigint() - start) / 1e6;
       const healthy = lag < HEALTH_LAG_THRESHOLD;
+
       resolve({
         healthy,
         eventLoopLag: `${lag.toFixed(2)}ms`,
@@ -138,6 +156,7 @@ export function checkHealth() {
 
 function gracefulShutdown(signal) {
   if (isShuttingDown) return;
+
   isShuttingDown = true;
   console.log(`[GUILLOTINE-GRACE] ${signal} received. Shutting down gracefully.`);
 
@@ -150,7 +169,7 @@ function gracefulShutdown(signal) {
     if (activeRequests === 0 && activeEncodes === 0) {
       clearTimeout(forceTimeout);
       clearInterval(checkInterval);
-      console.log('[GUILLOTINE-GRACE] All requests completed. Exiting with dignity.');
+      console.log('[GUILLOTINE-GRACE] All requests completed. Exiting.');
       process.exit(0);
     }
   }, 100);
@@ -159,7 +178,6 @@ function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// F9: Perceptual cache removed. Exact cache only.
 const exactCache = new LRUCache({
   max: 200,
   maxSize: 100 * 1024 * 1024,
@@ -167,42 +185,84 @@ const exactCache = new LRUCache({
 });
 
 // ============================================================
-// CHRONOS ADAPTIVE EFFORT (restored — no static ceiling)
+// CHRONOS v2 — pixel/format aware, no blind effort 9
 // ============================================================
 
 const CHRONOS_WINDOW = 10;
-const rollingEncodeTimes = [];
 
-function recordEncodeTime(ms) {
-  rollingEncodeTimes.push(ms);
-  if (rollingEncodeTimes.length > CHRONOS_WINDOW) {
-    rollingEncodeTimes.shift();
+const rollingByFormat = {
+  avif: [],
+  webp: []
+};
+
+function recordEncodeTime(ms, pixelCount, format) {
+  if (format !== 'avif' && format !== 'webp') return;
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  if (!Number.isFinite(pixelCount) || pixelCount <= 0) pixelCount = 1;
+
+  const mp = pixelCount / 1_000_000;
+  const msPerMegapixel = ms / Math.max(mp, 0.1);
+
+  if (!rollingByFormat[format]) rollingByFormat[format] = [];
+
+  rollingByFormat[format].push(msPerMegapixel);
+
+  if (rollingByFormat[format].length > CHRONOS_WINDOW) {
+    rollingByFormat[format].shift();
   }
 }
 
-function getAverageEncodeTime() {
-  if (rollingEncodeTimes.length === 0) return 0;
-  return rollingEncodeTimes.reduce((a, b) => a + b, 0) / rollingEncodeTimes.length;
+function getAverageMsPerMegapixel(format) {
+  const arr = rollingByFormat[format] || [];
+
+  if (arr.length === 0) return 0;
+
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
-function getChronosState(pixelCount) {
-  const avg = getAverageEncodeTime();
+function getColdStartEffort(pixelCount, outputFormat) {
+  const mp = pixelCount / 1_000_000;
 
-  // Cold start: no history, full power
-  if (rollingEncodeTimes.length < 3) {
-    return { state: 'COLD', effort: 9 };
+  if (outputFormat === 'avif') {
+    if (mp <= 1) return 8;
+    if (mp <= 3) return 7;
+    if (mp <= 8) return 6;
+    if (mp <= 20) return 5;
+    if (mp <= 50) return 4;
+    return 3;
   }
 
-  const millions = pixelCount / 1_000_000;
-  const msPerMegapixel = avg / Math.max(millions, 0.1);
+  if (outputFormat === 'webp') {
+    if (mp <= 2) return 6;
+    if (mp <= 8) return 5;
+    if (mp <= 20) return 4;
+    return 3;
+  }
 
-  if (msPerMegapixel > 800) return { state: 'CRITICAL', effort: 2 };
-  if (msPerMegapixel > 500) return { state: 'SEVERE', effort: 3 };
-  if (msPerMegapixel > 300) return { state: 'HEAVY', effort: 4 };
-  if (msPerMegapixel > 200) return { state: 'MODERATE', effort: 5 };
-  if (msPerMegapixel > 120) return { state: 'LIGHT', effort: 6 };
-  if (msPerMegapixel > 60) return { state: 'EASY', effort: 7 };
-  return { state: 'NORMAL', effort: 8 };
+  return 4;
+}
+
+function getChronosState(pixelCount, outputFormat) {
+  const samples = rollingByFormat[outputFormat] || [];
+
+  if (samples.length < 3) {
+    return {
+      state: 'COLD',
+      effort: getColdStartEffort(pixelCount, outputFormat)
+    };
+  }
+
+  const avg = getAverageMsPerMegapixel(outputFormat);
+
+  if (avg < 40) return { state: 'FAST', effort: 9 };
+  if (avg < 80) return { state: 'SWIFT', effort: 8 };
+  if (avg < 150) return { state: 'NORMAL', effort: 7 };
+  if (avg < 250) return { state: 'LIGHT', effort: 6 };
+  if (avg < 400) return { state: 'MODERATE', effort: 5 };
+  if (avg < 700) return { state: 'HEAVY', effort: 4 };
+  if (avg < 1200) return { state: 'SEVERE', effort: 3 };
+
+  return { state: 'CRITICAL', effort: 2 };
 }
 
 // ============================================================
@@ -215,35 +275,27 @@ function envBool(name, fallback = false) {
   return v === '1' || v === 'true' || v === 'yes';
 }
 
-const ENABLE_AVIF = envBool('ENABLE_AVIF', true);
-const ENABLE_WEBP = envBool('ENABLE_WEBP', true);
-const FORCE_JPEG = envBool('FORCE_JPEG', false);
 const FORCE_GRAYSCALE = envBool('FORCE_GRAYSCALE', false);
 const STRIP_ALPHA = envBool('STRIP_ALPHA', true);
+
 const ENABLE_PLACEHOLDER = envBool('ENABLE_PLACEHOLDER', true);
+const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
+const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
 const ENABLE_JUDGE = envBool('ENABLE_JUDGE', true);
 const ENABLE_MOIRE = envBool('ENABLE_MOIRE', true);
 const ENABLE_LINE_DENOISE = envBool('ENABLE_LINE_DENOISE', true);
 const ENABLE_LUMINANCE = envBool('ENABLE_LUMINANCE', true);
-const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
 const ENABLE_DESKEW = envBool('ENABLE_DESKEW', true);
-const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
-const ENABLE_DITHER_ASSASSIN = envBool('ENABLE_DITHER_ASSASSIN', true);
 const ENABLE_BANDING_EXORCIST = envBool('ENABLE_BANDING_EXORCIST', true);
 const ENABLE_ALPHA_SENTINEL = envBool('ENABLE_ALPHA_SENTINEL', true);
 const ENABLE_LAYOUT_PROPHET = envBool('ENABLE_LAYOUT_PROPHET', true);
 const ENABLE_ENCODING_VERIFIER = envBool('ENABLE_ENCODING_VERIFIER', true);
 const ENABLE_GHOST_STRIPPER = envBool('ENABLE_GHOST_STRIPPER', true);
-const ENABLE_FORMAT_DUELIST = envBool('ENABLE_FORMAT_DUELIST', true);
 const ENABLE_METADATA_REAPER = envBool('ENABLE_METADATA_REAPER', true);
 const ENABLE_WEBP_PRESET = envBool('ENABLE_WEBP_PRESET', true);
-const ENABLE_PROGRESSIVE_PNG = envBool('ENABLE_PROGRESSIVE_PNG', true);
-const ENABLE_STREAM_REAPER = envBool('ENABLE_STREAM_REAPER', true);
 const ENABLE_TIMEOUT_GUILLOTINE = envBool('ENABLE_TIMEOUT_GUILLOTINE', true);
 const ENABLE_DIMENSION_OVERLORD = envBool('ENABLE_DIMENSION_OVERLORD', true);
-const ENABLE_QUANTUM_SORCERER = envBool('ENABLE_QUANTUM_SORCERER', true);
 const ENABLE_ORACLE_LEDGER = envBool('ENABLE_ORACLE_LEDGER', true);
-const ENABLE_GUILLOTINE_GRACE = envBool('ENABLE_GUILLOTINE_GRACE', true);
 
 function parseTriState(value, defaultValue) {
   if (Array.isArray(value)) {
@@ -261,7 +313,7 @@ function parseTriState(value, defaultValue) {
 }
 
 // ============================================================
-// IMAGE ANALYSIS HELPERS
+// ANALYSIS HELPERS
 // ============================================================
 
 async function generatePlaceholderAndPalette(buffer) {
@@ -295,8 +347,10 @@ async function generatePlaceholderAndPalette(buffer) {
     const isVoid = stdev < 1;
 
     let palette = [];
+
     if (!isVoid) {
       const sorted = [...colorCounts.entries()].sort((a, b) => b[1] - a[1]);
+
       palette = sorted.slice(0, 3).map(([colorKey]) => {
         const hex = colorKey.toString(16).padStart(6, '0');
         return `#${hex}`;
@@ -304,6 +358,7 @@ async function generatePlaceholderAndPalette(buffer) {
     }
 
     let placeholder = null;
+
     if (ENABLE_PLACEHOLDER && !isVoid) {
       const thumbBuffer = await sharp(buffer)
         .resize(32, 32, { fit: 'inside' })
@@ -336,7 +391,7 @@ async function detectSkew(buffer) {
       data[0],
       data[w - 1],
       data[(h - 1) * w],
-      data[h * w - 1],
+      data[h * w - 1]
     ];
 
     const bgValue = corners.reduce((a, b) => a + b, 0) / 4;
@@ -351,6 +406,7 @@ async function detectSkew(buffer) {
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const v = data[y * w + x];
+
         if (Math.abs(v - bgValue) > 30) {
           sumX += x;
           sumY += y;
@@ -383,6 +439,7 @@ async function detectSkew(buffer) {
 }
 
 let _noiseTilePromise = null;
+
 function getNoiseTile() {
   if (!_noiseTilePromise) {
     _noiseTilePromise = (async () => {
@@ -392,6 +449,7 @@ function getNoiseTile() {
 
       for (let i = 0; i < size * size; i++) {
         const noise = Math.floor(Math.random() * 256);
+
         data[i * channels] = noise;
         data[i * channels + 1] = noise;
         data[i * channels + 2] = noise;
@@ -399,7 +457,7 @@ function getNoiseTile() {
       }
 
       return sharp(data, {
-        raw: { width: size, height: size, channels: channels },
+        raw: { width: size, height: size, channels: channels }
       }).png().toBuffer();
     })();
   }
@@ -412,6 +470,7 @@ async function detectAlphaStrippable(buffer, metadata) {
 
   try {
     const sampleSize = 64;
+
     const { data, info } = await sharp(buffer)
       .resize(sampleSize, sampleSize, { fit: 'inside' })
       .raw()
@@ -440,13 +499,27 @@ function verifyOutput(buffer, format) {
   switch (format) {
     case 'jpeg':
       return buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
-    case 'png':
-      return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+
     case 'webp':
-      return buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
-        buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50;
+      return (
+        buffer[0] === 0x52 &&
+        buffer[1] === 0x49 &&
+        buffer[2] === 0x46 &&
+        buffer[3] === 0x46 &&
+        buffer[8] === 0x57 &&
+        buffer[9] === 0x45 &&
+        buffer[10] === 0x42 &&
+        buffer[11] === 0x50
+      );
+
     case 'avif':
-      return buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70;
+      return (
+        buffer[4] === 0x66 &&
+        buffer[5] === 0x74 &&
+        buffer[6] === 0x79 &&
+        buffer[7] === 0x70
+      );
+
     default:
       return true;
   }
@@ -454,10 +527,15 @@ function verifyOutput(buffer, format) {
 
 function getWebpPreset(analysis, lineArtResult, origW, origH) {
   if (!ENABLE_WEBP_PRESET) return 'default';
-  if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) return 'drawing';
+
+  if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) {
+    return 'drawing';
+  }
+
   if (analysis.isAnime) return 'picture';
   if (analysis.entropy > 7.5) return 'photo';
   if (origW < 256 && origH < 256) return 'icon';
+
   return 'default';
 }
 
@@ -496,6 +574,7 @@ function judgeQuality(analysis, metadata) {
   else if (colorVariance < 15) score -= 10;
 
   let grade, qualityAdjust;
+
   if (score >= 90) { grade = 'S'; qualityAdjust = -15; }
   else if (score >= 75) { grade = 'A'; qualityAdjust = -10; }
   else if (score >= 60) { grade = 'B'; qualityAdjust = -5; }
@@ -505,7 +584,7 @@ function judgeQuality(analysis, metadata) {
   else { grade = 'F'; qualityAdjust = 15; }
 
   return { grade, qualityAdjust, score };
-    }
+}
 
 async function detectHalftone(buffer, metadata, analysis) {
   if (analysis.colorVariance > 50) {
@@ -589,7 +668,7 @@ async function detectHalftone(buffer, metadata, analysis) {
       isHalftone,
       confidence: isHalftone ? 0.9 : 0.1,
       microVariance,
-      macroVariance,
+      macroVariance
     };
   } catch {
     return { isHalftone: false, confidence: 0 };
@@ -609,6 +688,7 @@ async function detectLineArt(buffer, analysis) {
       .toBuffer({ resolveWithObject: true });
 
     const hist = new Array(256).fill(0);
+
     for (let i = 0; i < data.length; i++) {
       hist[data[i]]++;
     }
@@ -622,6 +702,7 @@ async function detectLineArt(buffer, analysis) {
     for (let i = 175; i <= 255; i++) lightPeak = Math.max(lightPeak, hist[i]);
 
     let middleSum = 0;
+
     for (let i = 100; i <= 155; i++) middleSum += hist[i];
 
     const darkRatio = darkPeak / total;
@@ -646,7 +727,7 @@ async function detectImageType(buffer, metadata) {
     : buffer;
 
   const stats = await sharp(statsSource).stats();
-  const { channels, width, height } = stats;
+  const { channels } = stats;
 
   let totalEntropy = 0;
   let totalSharpness = 0;
@@ -672,14 +753,18 @@ async function detectImageType(buffer, metadata) {
       const rMean = channels[0].mean || 0;
       const gMean = channels[1].mean || 0;
       const bMean = channels[2].mean || 0;
-      colorVariance = Math.abs(rMean - gMean) + Math.abs(gMean - bMean) + Math.abs(rMean - bMean);
+
+      colorVariance =
+        Math.abs(rMean - gMean) +
+        Math.abs(gMean - bMean) +
+        Math.abs(rMean - bMean);
     }
   }
 
   const isGrayscale = colorVariance < 15;
   const isHighContrast = totalEntropy > 6.5;
   const isColorful = colorVariance > 80;
-  const aspectRatio = (metadata.height || height) / (metadata.width || width);
+  const aspectRatio = (metadata.height || 0) / Math.max(metadata.width || 1, 1);
 
   const isMangaStrip = aspectRatio > 2.5;
   const isMangaPage = aspectRatio > 1.2 && aspectRatio < 2.0 && isGrayscale;
@@ -698,7 +783,7 @@ async function detectImageType(buffer, metadata) {
     aspectRatio,
     meanLuminance,
     stdevLuminance,
-    maxLuminance,
+    maxLuminance
   };
 }
 
@@ -711,12 +796,44 @@ function getViewportMaxDim(req) {
     parseFloat(req.headers['dpr']) || 1;
 
   const effectiveWidth = Math.round(viewportWidth * dpr);
+
   return Math.max(320, Math.min(effectiveWidth, MAX_OUTPUT_DIM));
 }
 
 function getChromaSubsampling(analysis) {
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
   return '4:2:0';
+    }
+
+// ============================================================
+// FORCED FORMAT SELECTOR
+// ============================================================
+
+function chooseOutputFormat(metadata, totalPixelCost) {
+  const isAnimated = (metadata.pages || 1) > 1;
+  const format = metadata.format;
+
+  // GIF and animated images → WebP
+  if (format === 'gif' || isAnimated) {
+    return 'webp';
+  }
+
+  // Still images → AVIF if within safety limits
+  const width = metadata.width || 0;
+  const height = metadata.height || 0;
+
+  if (
+    width > 0 &&
+    height > 0 &&
+    width <= AVIF_MAX_DIMENSION &&
+    height <= AVIF_MAX_DIMENSION &&
+    totalPixelCost <= AVIF_MAX_PIXELS
+  ) {
+    return 'avif';
+  }
+
+  // Too large for AVIF → JPEG fallback
+  return 'jpeg';
 }
 
 // ============================================================
@@ -746,7 +863,6 @@ export default async function compress(req, res, buffer, governor) {
 
   let clientDisconnected = false;
 
-  // Sharp hard timeout guillotine
   const timeoutHandle = setTimeout(() => {
     clientDisconnected = true;
     abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
@@ -780,7 +896,7 @@ export default async function compress(req, res, buffer, governor) {
       return buffer;
     }
 
-    // F12-MODIFIED: raw/bypass removed, mode is always a valid allowed mode
+    // F12-MODIFIED: raw/bypass removed
     const mode = req.opts?.mode || 'auto';
     const isPhotoMode = mode === 'photo' || mode === 'normal';
     const isMangaMode = mode === 'manga' || mode === 'comic';
@@ -792,17 +908,7 @@ export default async function compress(req, res, buffer, governor) {
     const allowLineArtFilters = allowEnhancements && !isPhotoMode;
     const allowPhotoFilters = allowEnhancements && !isMangaMode && !isStripMode;
 
-    const paramFingerprint = [
-      req.opts?.format,
-      req.opts?.quality,
-      req.opts?.grayscale,
-      req.opts?.maxDim,
-      req.opts?.maxStripWidth,
-      mode,
-      sharpenPreference === undefined ? '' : String(sharpenPreference),
-      req.opts?.rotate || 0
-    ].join('|');
-
+    // Dimension overlord
     if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
       const MAX_ASPECT_RATIO = 200;
@@ -833,6 +939,27 @@ export default async function compress(req, res, buffer, governor) {
       return Buffer.alloc(0);
     }
 
+    // Calculate pixel cost for memory governor
+    const frames = metadata.pages || 1;
+    const width = metadata.width || 0;
+    const height = metadata.height || 0;
+    totalPixelCost = width * height * frames;
+
+    // FORCED FORMAT SELECTION
+    const outputFormat = chooseOutputFormat(metadata, totalPixelCost);
+
+    const paramFingerprint = [
+      outputFormat,
+      req.opts?.quality,
+      req.opts?.grayscale,
+      req.opts?.maxDim,
+      req.opts?.maxStripWidth,
+      mode,
+      sharpenPreference === undefined ? '' : String(sharpenPreference),
+      req.opts?.rotate || 0
+    ].join('|');
+
+    // Exact cache lookup
     const exactHash = await generateExactHash(buffer);
     const exactKey = exactHash ? `${exactHash}:${paramFingerprint}` : null;
 
@@ -859,6 +986,7 @@ export default async function compress(req, res, buffer, governor) {
       }
     }
 
+    // Void watcher / placeholder / palette
     let thumbResult = null;
 
     if ((ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) && allowEnhancements) {
@@ -887,12 +1015,7 @@ export default async function compress(req, res, buffer, governor) {
       metrics.cacheMisses++;
     }
 
-    // F2-ADAPTIVE: Memory governor pixel admission
-    const frames = metadata.pages || 1;
-    const width = metadata.width || 0;
-    const height = metadata.height || 0;
-    totalPixelCost = width * height * frames;
-
+    // Memory governor pixel admission
     if (!memGov.admitPixels(totalPixelCost)) {
       res.status(503);
       res.setHeader('X-Memory-Governor', 'REJECTED');
@@ -921,6 +1044,7 @@ export default async function compress(req, res, buffer, governor) {
         res.setHeader('X-Palette', palette.join(','));
       }
 
+      // Deskew
       let skewAngle = 0;
 
       if (ENABLE_DESKEW && allowEnhancements && !isStripMode && !analysis.isMangaStrip) {
@@ -938,24 +1062,28 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
+      // Judge quality
       let judgeResult = null;
 
       if (ENABLE_JUDGE && allowEnhancements) {
         judgeResult = judgeQuality(analysis, metadata);
       }
 
+      // Halftone / moire detection
       let halftoneResult = null;
 
       if (ENABLE_MOIRE && allowEnhancements && !isStripMode) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
 
+      // Line art detection
       let lineArtResult = null;
 
-      if ((ENABLE_LINE_DENOISE || ENABLE_DITHER_ASSASSIN) && allowLineArtFilters) {
+      if (ENABLE_LINE_DENOISE && allowLineArtFilters) {
         lineArtResult = await detectLineArt(buffer, analysis);
       }
 
+      // Alpha sentinel
       let alphaStrippable = false;
       const isAnimated = metadata.pages > 1;
 
@@ -974,34 +1102,21 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
-      // CHRONOS ADAPTIVE EFFORT: no static ceiling
-      const chronos = getChronosState(totalPixelCost);
+      // CHRONOS v2: pixel/format aware effort
+      const chronos = getChronosState(totalPixelCost, outputFormat);
       const effort = chronos.effort;
 
       res.setHeader('X-Chronos-State', chronos.state);
       res.setHeader('X-Chronos-Effort', String(effort));
 
-      const requestedFormat = req.opts?.format || req.query.f || req.query.format;
-      let outputFormat = 'jpeg';
-
-      if (FORCE_JPEG) {
-        outputFormat = 'jpeg';
-      } else if (requestedFormat === 'avif' && ENABLE_AVIF) {
-        outputFormat = 'avif';
-      } else if (requestedFormat === 'webp' && ENABLE_WEBP) {
-        outputFormat = 'webp';
-      } else if (requestedFormat === 'jpeg' || requestedFormat === 'jpg') {
-        outputFormat = 'jpeg';
-      } else if (requestedFormat === 'png') {
-        outputFormat = 'png';
-      }
-
+      // Quality
       let quality = req.opts?.quality ?? (parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY);
 
       if (judgeResult) {
         quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
       }
 
+      // Frame cap for animated images
       const frameCount = metadata.pages || 1;
 
       if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
@@ -1014,26 +1129,12 @@ export default async function compress(req, res, buffer, governor) {
         return buffer;
       }
 
-      let ditherAssassinActive = false;
-
-      if (
-        ENABLE_DITHER_ASSASSIN &&
-        allowLineArtFilters &&
-        lineArtResult &&
-        lineArtResult.isLineArt &&
-        lineArtResult.confidence > 0.85 &&
-        !isAnimated
-      ) {
-        ditherAssassinActive = true;
-        recordMetric('ditherAssassin');
-      }
-
+      // Banding exorcist check
       let bandingExorcistActive = false;
 
       if (
         ENABLE_BANDING_EXORCIST &&
         allowPhotoFilters &&
-        !ditherAssassinActive &&
         !isAnimated
       ) {
         if (
@@ -1052,6 +1153,7 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
+      // Build Sharp pipeline
       let pipeline = sharp(buffer, {
         animated: isAnimated,
         limitInputPixels: 0
@@ -1073,14 +1175,20 @@ export default async function compress(req, res, buffer, governor) {
         pipeline = pipeline.rotate(req.opts.rotate);
       }
 
+      // Grayscale
       const userExplicitlyWantsColor = req.opts?.grayscale === false;
       const userExplicitlyWantsBW = req.opts?.grayscale === true;
 
-      if (FORCE_GRAYSCALE || userExplicitlyWantsBW || (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)) {
+      if (
+        FORCE_GRAYSCALE ||
+        userExplicitlyWantsBW ||
+        (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)
+      ) {
         pipeline = pipeline.grayscale();
       }
 
-      if (ENABLE_LUMINANCE && allowPhotoFilters && !isAnimated && !ditherAssassinActive) {
+      // Luminance fix
+      if (ENABLE_LUMINANCE && allowPhotoFilters && !isAnimated) {
         if (analysis.meanLuminance < 85 && analysis.stdevLuminance < 50) {
           pipeline = pipeline.gamma(1.4);
           res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
@@ -1092,7 +1200,8 @@ export default async function compress(req, res, buffer, governor) {
         }
       }
 
-      if (ENABLE_GHOST_STRIPPER && allowPhotoFilters && !isAnimated && !ditherAssassinActive) {
+      // Ghost stripper
+      if (ENABLE_GHOST_STRIPPER && allowPhotoFilters && !isAnimated) {
         if (analysis.meanLuminance > 150 && analysis.maxLuminance > 200 && analysis.maxLuminance < 253) {
           const stretch = 255 / analysis.maxLuminance;
           pipeline = pipeline.linear(stretch, 0);
@@ -1101,12 +1210,16 @@ export default async function compress(req, res, buffer, governor) {
         }
       }
 
+      // Deskew rotation
       if (ENABLE_DESKEW && allowEnhancements && skewAngle !== 0) {
         pipeline = pipeline.rotate(skewAngle, {
-          background: analysis.isGrayscale ? { r: 255, g: 255, b: 255 } : { r: 255, g: 255, b: 255, alpha: 0 },
+          background: analysis.isGrayscale
+            ? { r: 255, g: 255, b: 255 }
+            : { r: 255, g: 255, b: 255, alpha: 0 },
         });
       }
 
+      // Moire removal
       if (
         allowEnhancements &&
         halftoneResult &&
@@ -1118,13 +1231,12 @@ export default async function compress(req, res, buffer, governor) {
         recordMetric('moireRemoval');
       }
 
-      // F1: Fixed — single X-Line-Denoise block, no duplicate
+      // Line denoise
       if (
         allowLineArtFilters &&
         lineArtResult &&
         lineArtResult.isLineArt &&
-        lineArtResult.confidence > 0.85 &&
-        !ditherAssassinActive
+        lineArtResult.confidence > 0.85
       ) {
         pipeline = pipeline.median(3);
 
@@ -1140,6 +1252,7 @@ export default async function compress(req, res, buffer, governor) {
         recordMetric('lineDenoise');
       }
 
+      // Resize
       let targetWidth = null;
       let targetHeight = null;
 
@@ -1160,6 +1273,7 @@ export default async function compress(req, res, buffer, governor) {
         }
       }
 
+      // Layout prophet headers
       if (ENABLE_LAYOUT_PROPHET) {
         let outW = origW;
         let outH = origH;
@@ -1192,6 +1306,7 @@ export default async function compress(req, res, buffer, governor) {
         });
       }
 
+      // Sharpen
       const contentWantsSharpen =
         sharpenPreference !== false &&
         analysis.sharpness < 50 &&
@@ -1199,8 +1314,7 @@ export default async function compress(req, res, buffer, governor) {
 
       if (
         allowEnhancements &&
-        (sharpenPreference === true || contentWantsSharpen) &&
-        !ditherAssassinActive
+        (sharpenPreference === true || contentWantsSharpen)
       ) {
         const alreadySharpened =
           allowLineArtFilters &&
@@ -1217,12 +1331,14 @@ export default async function compress(req, res, buffer, governor) {
         }
       }
 
+      // Alpha handling
       if (alphaStrippable) {
         pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
-      } else if (STRIP_ALPHA && outputFormat === 'jpeg' && !ditherAssassinActive) {
+      } else if (STRIP_ALPHA && outputFormat === 'jpeg') {
         pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
       }
 
+      // Banding exorcist
       if (bandingExorcistActive) {
         const noiseTile = await getNoiseTile();
 
@@ -1241,201 +1357,12 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
+      // ENCODE — forced format: avif / webp / jpeg only
       let outputBuffer;
       let contentType;
 
       const encodeStart = Date.now();
       activeEncodes++;
-
-      const needsBuffer = ENABLE_ENCODING_VERIFIER ||
-        ditherAssassinActive ||
-        (outputFormat === 'png' && !ENABLE_PROGRESSIVE_PNG);
-
-      if (ENABLE_STREAM_REAPER && !needsBuffer && !clientDisconnected) {
-        res.setHeader('X-Stream-Reaper', 'ACTIVE');
-        recordMetric('streamReaper');
-
-        const passthrough = new PassThrough();
-
-        switch (outputFormat) {
-          case 'avif':
-            contentType = 'image/avif';
-            pipeline = pipeline.avif({
-              quality: Math.min(quality, 63),
-              effort: effort,
-              chromaSubsampling: getChromaSubsampling(analysis),
-            });
-            break;
-
-          case 'webp':
-            contentType = 'image/webp';
-            pipeline = pipeline.webp({
-              quality: quality,
-              effort: effort,
-              smartSubsample: true,
-              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
-            });
-            break;
-
-          case 'jpeg':
-          default:
-            contentType = 'image/jpeg';
-            pipeline = pipeline.jpeg({
-              quality: quality,
-              progressive: true,
-              mozjpeg: true,
-              chromaSubsampling: getChromaSubsampling(analysis),
-              trellisQuantisation: true,
-              overshootDeringing: true,
-              optimiseScans: true,
-            });
-            break;
-        }
-
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('X-Perceptual-Cache', 'REMOVED');
-        res.setHeader('X-Encode-Quality', String(quality));
-        res.setHeader('X-Encode-Effort', String(effort));
-        res.setHeader('X-Encode-Dims', `${targetWidth || origW}x${targetHeight || origH}`);
-
-        if (judgeResult) {
-          res.setHeader('X-Quality-Grade', judgeResult.grade);
-          res.setHeader('X-Quality-Score', String(judgeResult.score));
-        }
-
-        res.setHeader('X-Image-Type', analysis.isMangaStrip ? 'manga-strip' :
-          analysis.isMangaPage ? 'manga-page' :
-          analysis.isAnime ? 'anime' :
-          analysis.isGrayscale ? 'grayscale' : 'photo');
-
-        pipeline.pipe(passthrough);
-        passthrough.pipe(res);
-
-        if (ENABLE_TIMEOUT_GUILLOTINE) {
-          signal.addEventListener('abort', () => {
-            pipeline.destroy();
-            passthrough.destroy();
-
-            if (!res.writableEnded) {
-              res.end();
-            }
-          }, { once: true });
-        }
-
-        await new Promise((resolve, reject) => {
-          passthrough.on('finish', resolve);
-          passthrough.on('error', reject);
-          passthrough.on('close', resolve);
-          pipeline.on('error', reject);
-        });
-
-        const encodeEnd = Date.now();
-        const encodeTime = encodeEnd - encodeStart;
-
-        // Chronos: record encode time for adaptive effort
-        recordEncodeTime(encodeTime);
-
-        res.setHeader('X-Processing-Time', `${encodeTime}ms`);
-
-        if (ENABLE_ORACLE_LEDGER) {
-          metrics.formatCounts[outputFormat] = (metrics.formatCounts[outputFormat] || 0) + 1;
-          metrics.totalEncodeTime += encodeTime;
-          metrics.encodeCount++;
-        }
-
-        activeEncodes--;
-        return null;
-      }
-
-      let pipelinePromise;
-
-      if (ditherAssassinActive) {
-        pipeline = pipeline.threshold(128);
-
-        pipelinePromise = pipeline.png({
-          palette: true,
-          colours: 2,
-          compressionLevel: 9,
-          dither: 0,
-          progressive: ENABLE_PROGRESSIVE_PNG,
-        }).toBuffer();
-
-        contentType = 'image/png';
-        res.setHeader('X-Dither-Assassin', 'ACTIVE');
-      } else {
-        const chromaSubsampling = getChromaSubsampling(analysis);
-
-        switch (outputFormat) {
-          case 'avif':
-            pipelinePromise = pipeline.avif({
-              quality: Math.min(quality, 63),
-              effort: effort,
-              chromaSubsampling: chromaSubsampling,
-            }).toBuffer();
-
-            contentType = 'image/avif';
-            break;
-
-          case 'webp':
-            pipelinePromise = pipeline.webp({
-              quality: quality,
-              effort: effort,
-              smartSubsample: true,
-              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
-            }).toBuffer();
-
-            contentType = 'image/webp';
-            break;
-
-          case 'png': {
-            const useQuantumSorcerer = ENABLE_QUANTUM_SORCERER && allowLineArtFilters && (
-              analysis.entropy < 6.0 ||
-              (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.7) ||
-              analysis.isMangaPage ||
-              analysis.isMangaStrip
-            );
-
-            if (useQuantumSorcerer) {
-              pipelinePromise = pipeline.png({
-                compressionLevel: 8,
-                palette: true,
-                colours: 256,
-                dither: 1.0,
-                quality: quality,
-                progressive: ENABLE_PROGRESSIVE_PNG,
-              }).toBuffer();
-
-              res.setHeader('X-Quantum-Sorcerer', 'ACTIVE');
-              recordMetric('quantumSorcerer');
-            } else {
-              pipelinePromise = pipeline.png({
-                compressionLevel: 8,
-                palette: analysis.isGrayscale,
-                quality: quality,
-                progressive: ENABLE_PROGRESSIVE_PNG,
-              }).toBuffer();
-            }
-
-            contentType = 'image/png';
-            break;
-          }
-
-          case 'jpeg':
-          default:
-            pipelinePromise = pipeline.jpeg({
-              quality: quality,
-              progressive: true,
-              mozjpeg: true,
-              chromaSubsampling: chromaSubsampling,
-              trellisQuantisation: true,
-              overshootDeringing: true,
-              optimiseScans: true,
-            }).toBuffer();
-
-            contentType = 'image/jpeg';
-            break;
-        }
-      }
 
       if (ENABLE_TIMEOUT_GUILLOTINE) {
         const onAbort = () => {
@@ -1445,12 +1372,78 @@ export default async function compress(req, res, buffer, governor) {
         signal.addEventListener('abort', onAbort, { once: true });
 
         try {
-          outputBuffer = await pipelinePromise;
+          switch (outputFormat) {
+            case 'avif':
+              outputBuffer = await pipeline.avif({
+                quality: Math.min(quality, 63),
+                effort: Math.min(Math.max(effort, 0), 9),
+                chromaSubsampling: getChromaSubsampling(analysis),
+              }).toBuffer();
+              contentType = 'image/avif';
+              break;
+
+            case 'webp':
+              outputBuffer = await pipeline.webp({
+                quality: quality,
+                effort: Math.min(Math.max(effort, 0), 6),
+                smartSubsample: true,
+                preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+              }).toBuffer();
+              contentType = 'image/webp';
+              break;
+
+            case 'jpeg':
+            default:
+              outputBuffer = await pipeline.jpeg({
+                quality: quality,
+                progressive: true,
+                mozjpeg: true,
+                chromaSubsampling: getChromaSubsampling(analysis),
+                trellisQuantisation: true,
+                overshootDeringing: true,
+                optimiseScans: true,
+              }).toBuffer();
+              contentType = 'image/jpeg';
+              break;
+          }
         } finally {
           signal.removeEventListener('abort', onAbort);
         }
       } else {
-        outputBuffer = await pipelinePromise;
+        switch (outputFormat) {
+          case 'avif':
+            outputBuffer = await pipeline.avif({
+              quality: Math.min(quality, 63),
+              effort: Math.min(Math.max(effort, 0), 9),
+              chromaSubsampling: getChromaSubsampling(analysis),
+            }).toBuffer();
+            contentType = 'image/avif';
+            break;
+
+          case 'webp':
+            outputBuffer = await pipeline.webp({
+              quality: quality,
+              effort: Math.min(Math.max(effort, 0), 6),
+              smartSubsample: true,
+              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+            }).toBuffer();
+            contentType = 'image/webp';
+            break;
+
+          case 'jpeg':
+          default:
+            outputBuffer = await pipeline.jpeg({
+              quality: quality,
+              progressive: true,
+              mozjpeg: true,
+              chromaSubsampling: getChromaSubsampling(analysis),
+              trellisQuantisation: true,
+              overshootDeringing: true,
+              optimiseScans: true,
+            }).toBuffer();
+            contentType = 'image/jpeg';
+            break;
+        }
       }
 
       activeEncodes--;
@@ -1459,7 +1452,7 @@ export default async function compress(req, res, buffer, governor) {
       const encodeTime = encodeEnd - encodeStart;
 
       // Chronos: record encode time for adaptive effort
-      recordEncodeTime(encodeTime);
+      recordEncodeTime(encodeTime, totalPixelCost, outputFormat);
 
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
       res.setHeader('X-Encode-Effort', String(effort));
@@ -1476,6 +1469,7 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
+      // Encoding verifier
       if (ENABLE_ENCODING_VERIFIER) {
         if (!verifyOutput(outputBuffer, outputFormat)) {
           res.setHeader('X-Encoding-Verifier', 'FAILED');
@@ -1491,6 +1485,7 @@ export default async function compress(req, res, buffer, governor) {
         res.setHeader('X-Encoding-Verifier', 'PASSED');
       }
 
+      // If compressed is larger than original, return original
       if (outputBuffer.length >= buffer.length) {
         res.setHeader('X-Compression', 'SKIPPED');
         res.setHeader('Content-Type', `image/${format}`);
@@ -1514,6 +1509,7 @@ export default async function compress(req, res, buffer, governor) {
       const bytesSaved = buffer.length - outputBuffer.length;
       res.setHeader('X-Bytes-Saved', `${(bytesSaved / 1024).toFixed(1)}KB`);
 
+      // Cache set
       const cacheEntry = {
         buffer: outputBuffer,
         contentType: contentType,
@@ -1546,7 +1542,7 @@ export default async function compress(req, res, buffer, governor) {
 
       return outputBuffer;
     } finally {
-      // F2-ADAPTIVE: Release pixel budget
+      // Release pixel budget
       if (totalPixelCost > 0) {
         memGov.releasePixels(totalPixelCost);
       }
@@ -1580,4 +1576,4 @@ export default async function compress(req, res, buffer, governor) {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     activeRequests--;
   }
-    }
+                  }
