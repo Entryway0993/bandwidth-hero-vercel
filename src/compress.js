@@ -813,27 +813,26 @@ function chooseOutputFormat(metadata, totalPixelCost) {
   const isAnimated = (metadata.pages || 1) > 1;
   const format = metadata.format;
 
-  // GIF and animated images → WebP
   if (format === 'gif' || isAnimated) {
-    return 'webp';
+    return { format: 'webp', reason: 'animated_or_gif' };
   }
 
-  // Still images → AVIF if within safety limits
   const width = metadata.width || 0;
   const height = metadata.height || 0;
 
-  if (
-    width > 0 &&
-    height > 0 &&
-    width <= AVIF_MAX_DIMENSION &&
-    height <= AVIF_MAX_DIMENSION &&
-    totalPixelCost <= AVIF_MAX_PIXELS
-  ) {
-    return 'avif';
+  if (width <= 0 || height <= 0) {
+    return { format: 'jpeg', reason: 'unknown_dimensions' };
   }
 
-  // Too large for AVIF → JPEG fallback
-  return 'jpeg';
+  if (width > AVIF_MAX_DIMENSION || height > AVIF_MAX_DIMENSION) {
+    return { format: 'jpeg', reason: 'dimension_over_avif_limit' };
+  }
+
+  if (totalPixelCost > AVIF_MAX_PIXELS) {
+    return { format: 'jpeg', reason: 'pixel_cost_over_avif_limit' };
+  }
+
+  return { format: 'avif', reason: 'avif_allowed' };
 }
 
 // ============================================================
@@ -863,20 +862,48 @@ export default async function compress(req, res, buffer, governor) {
 
   let clientDisconnected = false;
 
+  const startedAt = Date.now();
+
   const timeoutHandle = setTimeout(() => {
+    console.warn(JSON.stringify({
+      event: 'COMPRESS_ABORT',
+      reqId,
+      reason: 'SHARP_HARD_TIMEOUT',
+      elapsedMs: Date.now() - startedAt,
+      limitMs: SHARP_HARD_TIMEOUT_MS
+    }));
+
     clientDisconnected = true;
     abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
   }, SHARP_HARD_TIMEOUT_MS);
 
   if (ENABLE_TIMEOUT_GUILLOTINE) {
     req.on('close', () => {
-      clientDisconnected = true;
-      abortController.abort(new Error('CLIENT_DISCONNECT'));
+      if (!res.writableEnded) {
+        console.warn(JSON.stringify({
+          event: 'COMPRESS_ABORT',
+          reqId,
+          reason: 'CLIENT_DISCONNECT',
+          elapsedMs: Date.now() - startedAt
+        }));
+
+        clientDisconnected = true;
+        abortController.abort(new Error('CLIENT_DISCONNECT'));
+      }
     });
 
     res.on('close', () => {
-      clientDisconnected = true;
-      abortController.abort(new Error('RESPONSE_CLOSED'));
+      if (!res.writableEnded) {
+        console.warn(JSON.stringify({
+          event: 'COMPRESS_ABORT',
+          reqId,
+          reason: 'RESPONSE_CLOSED',
+          elapsedMs: Date.now() - startedAt
+        }));
+
+        clientDisconnected = true;
+        abortController.abort(new Error('RESPONSE_CLOSED'));
+      }
     });
   }
 
@@ -946,8 +973,30 @@ export default async function compress(req, res, buffer, governor) {
     totalPixelCost = width * height * frames;
 
     // FORCED FORMAT SELECTION
-    const outputFormat = chooseOutputFormat(metadata, totalPixelCost);
+    const formatDecision = chooseOutputFormat(metadata, totalPixelCost);
+    const outputFormat = formatDecision.format;
 
+    let logUrl = 'unknown';
+    try {
+      const u = new URL(req.opts?.url);
+      logUrl = u.origin + u.pathname;
+    } catch {}
+
+    res.setHeader('X-Format-Reason', formatDecision.reason);
+
+    console.log(JSON.stringify({
+      event: 'FORMAT_DECISION',
+      reqId,
+      url: logUrl,
+      format: outputFormat,
+      reason: formatDecision.reason,
+      width,
+      height,
+      frames,
+      totalPixelCost,
+      avifMaxPixels: AVIF_MAX_PIXELS,
+      avifMaxDimension: AVIF_MAX_DIMENSION
+    }));
     const paramFingerprint = [
       outputFormat,
       req.opts?.quality,
