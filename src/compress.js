@@ -1540,6 +1540,40 @@ export default async function compress(req, res, buffer, governor) {
         analysis.isAnime ? 'anime' :
         analysis.isGrayscale ? 'grayscale' : 'photo');
 
+      // Vercel log: image analysis summary
+      console.log(JSON.stringify({
+        event: 'COMPRESS',
+        reqId: reqId,
+        url: (() => {
+  try {
+    const u = new URL(req.opts?.url);
+    return u.origin + u.pathname;
+  } catch {
+    return 'unknown';
+  }
+})(),
+        format: outputFormat,
+        quality: quality,
+        effort: effort,
+        chronosState: chronos.state,
+        grade: judgeResult ? judgeResult.grade : null,
+        score: judgeResult ? judgeResult.score : null,
+        inputBytes: buffer.length,
+        outputBytes: outputBuffer.length,
+        savedBytes: buffer.length - outputBuffer.length,
+        compressionRatio: ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%',
+        encodeTimeMs: encodeTime,
+        inputDims: `${origW}x${origH}`,
+        outputDims: `${targetWidth || origW}x${targetHeight || origH}`,
+        pixelCost: totalPixelCost,
+        imageType: analysis.isMangaStrip ? 'manga-strip' :
+          analysis.isMangaPage ? 'manga-page' :
+          analysis.isAnime ? 'anime' :
+          analysis.isGrayscale ? 'grayscale' : 'photo',
+        frames: frames,
+        mode: mode
+      }));
+
       return outputBuffer;
     } finally {
       // Release pixel budget
