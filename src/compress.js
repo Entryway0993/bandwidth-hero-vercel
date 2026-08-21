@@ -837,6 +837,7 @@ function chooseOutputFormat(metadata, totalPixelCost) {
 
   // Over pixel cap: resize down to fit, still use AVIF
   return { format: 'avif', reason: 'avif_resized_to_fit' };
+ } 
 
 // ============================================================
 // MAIN COMPRESS FUNCTION
