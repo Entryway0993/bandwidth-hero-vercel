@@ -1636,23 +1636,20 @@ export default async function compress(req, res, buffer, governor) {
         analysis.isAnime ? 'anime' :
         analysis.isGrayscale ? 'grayscale' : 'photo');
 
-      // Vercel log: image analysis summary
+     // Vercel log: image analysis summary
       console.log(JSON.stringify({
-        event: 'COMPRESS',
-        reqId: reqId,
-        console.log(JSON.stringify({
         event: 'COMPRESS',
         reqId: reqId,
         activeRequests: activeRequests,
         activeEncodes: activeEncodes,
         url: (() => {
-  try {
-    const u = new URL(req.opts?.url);
-    return u.origin + u.pathname;
-  } catch {
-    return 'unknown';
-  }
-})(),
+          try {
+            const u = new URL(req.opts?.url);
+            return u.origin + u.pathname;
+          } catch {
+            return 'unknown';
+          }
+        })(),
         format: outputFormat,
         quality: quality,
         effort: effort,
