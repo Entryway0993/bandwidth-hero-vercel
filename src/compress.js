@@ -835,8 +835,8 @@ function chooseOutputFormat(metadata, totalPixelCost) {
     return { format: 'avif', reason: 'avif_allowed' };
   }
 
-  return { format: 'jpeg', reason: 'pixel_cost_over_avif_limit' };
-}
+  // Over pixel cap: resize down to fit, still use AVIF
+  return { format: 'avif', reason: 'avif_resized_to_fit' };
 
 // ============================================================
 // MAIN COMPRESS FUNCTION
@@ -1348,6 +1348,16 @@ export default async function compress(req, res, buffer, governor) {
         res.setHeader('X-Output-Height', String(outH));
         res.setHeader('X-Aspect-Ratio', aspectRatio);
         res.setHeader('X-Orientation', orientation);
+      }
+
+      // If pixel cost exceeds AVIF cap, force resize to fit
+      if (outputFormat === 'avif' && totalPixelCost > AVIF_MAX_PIXELS) {
+        const scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
+        targetWidth = Math.round(origW * scaleFactor);
+        targetHeight = Math.round(origH * scaleFactor);
+
+        res.setHeader('X-AVIF-Resize-To-Fit', 'true');
+        res.setHeader('X-AVIF-Resize-Scale', scaleFactor.toFixed(4));
       }
 
       if (targetWidth || targetHeight) {
