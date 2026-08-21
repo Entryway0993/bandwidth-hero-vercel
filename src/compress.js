@@ -229,8 +229,8 @@ function getColdStartEffort(pixelCount, outputFormat) {
     if (mp <= 3)   return 7;
     if (mp <= 4)   return 6;
     if (mp <= 6)   return 6;
-    if (mp <= 8)   return 5;
-    if (mp <= 10)  return 5;
+    if (mp <= 8)   return 4;
+    if (mp <= 10)  return 4;
     if (mp <= 12)  return 4;
     if (mp <= 15)  return 4;
     if (mp <= 18)  return 3;
@@ -1640,6 +1640,11 @@ export default async function compress(req, res, buffer, governor) {
       console.log(JSON.stringify({
         event: 'COMPRESS',
         reqId: reqId,
+        console.log(JSON.stringify({
+        event: 'COMPRESS',
+        reqId: reqId,
+        activeRequests: activeRequests,
+        activeEncodes: activeEncodes,
         url: (() => {
   try {
     const u = new URL(req.opts?.url);
