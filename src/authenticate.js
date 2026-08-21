@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-const { LOGIN, PASSWORD, API_KEY } = process.env;
+const { LOGIN, PASSWORD, API_KEY, VERCEL_SERVICE_KEY } = process.env;
 
 // F5-MODIFIED: Legacy query auth toggle
 const ALLOW_QUERY_API_KEY = ['1', 'true', 'yes', 'on'].includes(
@@ -70,13 +70,15 @@ function parseBasicAuth(req) {
 
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length === 0 || b.length === 0) return false;
+  
   const hashA = crypto.createHash('sha256').update(a).digest();
   const hashB = crypto.createHash('sha256').update(b).digest();
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
 export default function authenticate(req, res, next) {
-  if (!LOGIN && !PASSWORD && !API_KEY) {
+  if (!LOGIN && !PASSWORD && !API_KEY && !VERCEL_SERVICE_KEY) {
     console.error('🚨 CRITICAL: No authentication configured. Refusing to serve.');
     return res.status(500).json({
       error: 'Server misconfigured: Authentication is required.'
@@ -93,6 +95,13 @@ export default function authenticate(req, res, next) {
   // F6: Rate limit auth failures
   if (isAuthRateLimited(clientKey)) {
     return res.status(429).json({ error: 'Too many authentication failures. Try again later.' });
+  }
+
+  // 0. Check Internal Service Key (from Cloudflare Worker - F10 FIX)
+  const serviceKey = req.headers['x-vercel-service-key'];
+  if (VERCEL_SERVICE_KEY && serviceKey && safeCompare(serviceKey, VERCEL_SERVICE_KEY)) {
+    clearAuthFailure(clientKey);
+    return next();
   }
 
   // 1. Check Header API Key (preferred)
