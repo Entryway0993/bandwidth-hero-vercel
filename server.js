@@ -1,3 +1,6 @@
+// Force V8 heap limit before any imports load
+process.env.NODE_OPTIONS = '--max-old-space-size=1024';
+
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
