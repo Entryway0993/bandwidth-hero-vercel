@@ -225,9 +225,9 @@ function getColdStartEffort(pixelCount, outputFormat) {
 
   if (outputFormat === 'avif') {
     if (mp <= 2) return 7;
-    if (mp <= 5) return 6;
-    if (mp <= 15) return 5;
-    if (mp <= 30) return 4;
+    if (mp <= 5) return 5;
+    if (mp <= 15) return 4;
+    if (mp <= 30) return 3;
     return 3; // Never drop to 2 on cold start; AVIF effort 2 is visually degraded
   }
 
