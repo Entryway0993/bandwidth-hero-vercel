@@ -38,7 +38,7 @@ const MAX_ANIMATION_FRAMES = safeInt(process.env.MAX_ANIMATION_FRAMES, 300);
 const VIEWPORT_FALLBACK = safeInt(process.env.VIEWPORT_FALLBACK, 1080);
 const HEALTH_LAG_THRESHOLD = safeInt(process.env.HEALTH_LAG_THRESHOLD, 100);
 const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
-const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 30000);
+const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 50000);
 
 // Sharp AVIF hard limit is UNKNOWN, so these are conservative safety limits.
 const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
@@ -224,11 +224,11 @@ function getColdStartEffort(pixelCount, outputFormat) {
   const mp = pixelCount / 1_000_000;
 
   if (outputFormat === 'avif') {
-    if (mp <= 1) return 7;
-    if (mp <= 3) return 6;
-    if (mp <= 8) return 5;
-    if (mp <= 20) return 4;
-    if (mp <= 50) return 3;
+    if (mp <= 1) return 6;
+    if (mp <= 3) return 5;
+    if (mp <= 8) return 4;
+    if (mp <= 20) return 3;
+    if (mp <= 50) return 2;
     return 2;
   }
 
