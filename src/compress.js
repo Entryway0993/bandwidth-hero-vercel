@@ -15,8 +15,8 @@ function safeFloat(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-const SHARP_CACHE_MEMORY_MB = safeInt(process.env.SHARP_CACHE_MEMORY_MB, 350);
-sharp.cache({ memory: SHARP_CACHE_MEMORY_MB, files: 0, items: 100 });
+// Serverless functions die too fast for caching to matter. Free the RAM.
+sharp.cache({ memory: 0, files: 0, items: 0 });
 
 async function generateExactHash(buffer) {
   try {
@@ -179,8 +179,8 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 const exactCache = new LRUCache({
-  max: 200,
-  maxSize: 100 * 1024 * 1024,
+  max: 20,
+  maxSize: 20 * 1024 * 1024, // Shrink to 20MB
   sizeCalculation: (entry) => entry.buffer.length
 });
 
