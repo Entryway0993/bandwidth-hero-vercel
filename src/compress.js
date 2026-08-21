@@ -1626,7 +1626,10 @@ export default async function compress(req, res, buffer, governor) {
         mode: mode
       }));
 
+      res.setHeader('Content-Length', outputBuffer.length);
+
       return outputBuffer;
+    
     } finally {
       // Release pixel budget
       if (totalPixelCost > 0) {
