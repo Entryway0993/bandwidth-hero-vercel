@@ -41,8 +41,8 @@ const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
 const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 30000);
 
 // Sharp AVIF hard limit is UNKNOWN, so these are conservative safety limits.
-const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 25_000_000);
-const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 8192);
+const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
+const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 1200);
 
 const metrics = {
   startTime: Date.now(),
@@ -824,15 +824,18 @@ function chooseOutputFormat(metadata, totalPixelCost) {
     return { format: 'jpeg', reason: 'unknown_dimensions' };
   }
 
-  if (width > AVIF_MAX_DIMENSION || height > AVIF_MAX_DIMENSION) {
-    return { format: 'jpeg', reason: 'dimension_over_avif_limit' };
+  // WebP has a hard spec limit of 16383x16383. 
+  // If a strip is taller than that, WebP will crash. Force JPEG.
+  if (height > 16383 || width > 16383) {
+    return { format: 'jpeg', reason: 'exceeds_webp_and_safe_limits' };
   }
 
-  if (totalPixelCost > AVIF_MAX_PIXELS) {
-    return { format: 'jpeg', reason: 'pixel_cost_over_avif_limit' };
+  // Trust the pixel cost. The Memory Governor already admitted it.
+  if (totalPixelCost <= AVIF_MAX_PIXELS) {
+    return { format: 'avif', reason: 'avif_allowed' };
   }
 
-  return { format: 'avif', reason: 'avif_allowed' };
+  return { format: 'jpeg', reason: 'pixel_cost_over_avif_limit' };
 }
 
 // ============================================================
