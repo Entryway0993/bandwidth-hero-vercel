@@ -6,11 +6,15 @@ import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import crypto from 'node:crypto';
+import { brotliCompress } from 'node:zlib';
+import { promisify } from 'node:util';
 import authenticate from './src/authenticate.js';
 import params from './src/params.js';
 import proxy from './src/proxy.js';
 import { getMetrics, checkHealth } from './src/compress.js';
 import memoryGovernor from './src/memoryGovernor.js';
+
+const brotliCompressAsync = promisify(brotliCompress);
 
 const app = express();
 
@@ -58,14 +62,13 @@ app.use((req, res, next) => {
 
   res.json = async (body) => {
     try {
-      const { brotliCompressSync } = await import('node:zlib');
       const raw = JSON.stringify(body);
 
       if (raw.length < 1024) {
         return originalJson(body);
       }
 
-      const compressed = brotliCompressSync(Buffer.from(raw));
+      const compressed = await brotliCompressAsync(Buffer.from(raw));
 
       res.setHeader('Content-Encoding', 'br');
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
