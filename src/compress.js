@@ -1538,6 +1538,49 @@ export default async function compress(req, res, buffer, governor) {
         analysis.isAnime ? 'anime' :
         analysis.isGrayscale ? 'grayscale' : 'photo');
 
+      // Vercel log: image analysis summary
+      console.log(JSON.stringify({
+        event: 'COMPRESS',
+        reqId: reqId,
+        activeRequests: activeRequests,
+        activeEncodes: activeEncodes,
+        url: (() => {
+          try {
+            const u = new URL(req.opts?.url);
+            return u.origin + '/*';
+          } catch {
+            return 'unknown';
+          }
+        })(),
+        format: outputFormat,
+        quality: quality,
+        effort: effort,
+        chronosState: chronos.state,
+        grade: judgeResult ? judgeResult.grade : null,
+        score: judgeResult ? judgeResult.score : null,
+        inputBytes: buffer.length,
+        outputBytes: outputBuffer.length,
+        savedBytes: buffer.length - outputBuffer.length,
+        compressionRatio: ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%',
+        encodeTimeMs: encodeTime,
+        inputDims: `${width}x${height}`,
+        outputDims: `${targetWidth || origW}x${targetHeight || origH}`,
+        pixelCost: totalPixelCost,
+        imageType: analysis.isMangaStrip ? 'manga-strip' :
+          analysis.isMangaPage ? 'manga-page' :
+          analysis.isAnime ? 'anime' :
+          analysis.isGrayscale ? 'grayscale' : 'photo',
+        frames: frames,
+        mode: mode,
+        cpuPressure: cpuPressure,
+        cpuLagMs: Math.round(eventLoopLag * 100) / 100,
+        hdrConversion: needsHDRConversion,
+        textPreservation: isTextHeavy,
+        alphaTrim: Boolean(alphaBounds),
+        frameDrop: frameDropActive,
+        safeMetadata: ENABLE_SAFE_METADATA
+      }));
+
       res.setHeader('Content-Length', outputBuffer.length);
       return outputBuffer;
 
