@@ -1562,7 +1562,27 @@ export default async function compress(req, res, buffer, governor) {
         alphaTrimPad: getHeaderStr('X-Alpha-Trim-Pad') || false,
         frameDrop: getHeaderStr('X-Frame-Drop') || false,
         metadataReaper: ENABLE_METADATA_REAPER,
-        safeMetadata: ENABLE_SAFE_METADATA
+        safeMetadata: ENABLE_SAFE_METADATA,
+
+        // Structural transformations
+        grayscale: Boolean(
+          FORCE_GRAYSCALE ||
+          userExplicitlyWantsBW ||
+          (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)
+        ),
+
+        resize: (targetWidth || targetHeight)
+          ? `${targetWidth || origW}x${targetHeight || origH}`
+          : false,
+
+        colorspaceNormalization: 'srgb',
+
+        alphaFlatten: Boolean(
+          metadata.hasAlpha &&
+          (alphaStrippable || (STRIP_ALPHA && outputFormat === 'jpeg'))
+        ),
+
+        manualRotation: req.opts?.rotate ? String(req.opts.rotate) : false
       };
 
       const appliedEnhancements = Object.keys(enhancementState).filter((key) => {
