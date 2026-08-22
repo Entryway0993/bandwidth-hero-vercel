@@ -18,7 +18,21 @@ const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 8000;
 const BODY_TIMEOUT_MS = parseInt(process.env.BODY_TIMEOUT_MS, 10) || 20000;
 const UPSTREAM_DEADLINE_MS = parseInt(process.env.UPSTREAM_DEADLINE_MS, 10) || 20000;
 
-// F11: RAW_VAULT reduced, adaptive governor handles primary limits
+// FEATURE: Corrupted Image Auto-Retry
+const MAX_DECODE_RETRIES = safeInt(process.env.MAX_DECODE_RETRIES, 1);
+const ENABLE_CORRUPT_RETRY = envBoolLocal('ENABLE_CORRUPT_RETRY', true);
+
+function safeInt(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function envBoolLocal(name, fallback = false) {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
 const RAW_VAULT_MAX_BYTES = 20 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRY = 4 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRIES = 30;
@@ -58,7 +72,6 @@ const chromeDispatcher = new Agent({
   keepAliveTimeout: 10000
 });
 
-// F18-MODIFIED: General desktop UAs, no device-specific strings
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
@@ -93,7 +106,6 @@ function bypass(req, res, rawBody, statusCode = 200) {
   res.end(rawBody);
 }
 
-// F15: Sanitize URLs for logging
 function sanitizeUrl(url) {
   try {
     const u = new URL(url);
@@ -103,12 +115,32 @@ function sanitizeUrl(url) {
   }
 }
 
-// F15: Sanitize error messages
 function sanitizeError(err) {
   let msg = err?.message ? String(err.message) : 'Unknown error';
   msg = msg.replace(/\?[^\s]*/g, '');
   msg = msg.replace(/(api[_-]?key|apikey|api|key|token|secret|password)=([^\s&]*)/gi, '$1=[REDACTED]');
   return msg;
+}
+
+// FEATURE: Corrupted Image Auto-Retry — detect sharp decode failures
+function isSharpDecodeError(err) {
+  if (!err) return false;
+  const msg = String(err.message || '').toLowerCase();
+  const code = String(err.code || '').toLowerCase();
+
+  return (
+    msg.includes('input buffer is corrupt') ||
+    msg.includes('input file is missing') ||
+    msg.includes('invalid image') ||
+    msg.includes('image has corrupt') ||
+    msg.includes('unable to open') ||
+    msg.includes('not a valid') ||
+    msg.includes('vips') ||
+    msg.includes('decode') ||
+    msg.includes('corrupt') ||
+    code === 'err_sharp_decode' ||
+    code === 'vips_error'
+  );
 }
 
 function detectContentType(buffer) {
@@ -118,46 +150,30 @@ function detectContentType(buffer) {
 
   if (
     buffer.length >= 4 &&
-    buffer[0] === 0x89 &&
-    buffer[1] === 0x50 &&
-    buffer[2] === 0x4e &&
-    buffer[3] === 0x47
-  ) {
-    return 'image/png';
-  }
+    buffer[0] === 0x89 && buffer[1] === 0x50 &&
+    buffer[2] === 0x4e && buffer[3] === 0x47
+  ) return 'image/png';
 
   if (
     buffer.length >= 4 &&
-    buffer[0] === 0x47 &&
-    buffer[1] === 0x49 &&
-    buffer[2] === 0x46 &&
-    buffer[3] === 0x38
-  ) {
-    return 'image/gif';
-  }
+    buffer[0] === 0x47 && buffer[1] === 0x49 &&
+    buffer[2] === 0x46 && buffer[3] === 0x38
+  ) return 'image/gif';
 
   if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
 
   if (
     buffer.length >= 6 &&
-    buffer[0] === 0x00 &&
-    buffer[1] === 0x00 &&
-    buffer[2] === 0x01 &&
-    buffer[3] === 0x00
-  ) {
-    return 'image/x-icon';
-  }
+    buffer[0] === 0x00 && buffer[1] === 0x00 &&
+    buffer[2] === 0x01 && buffer[3] === 0x00
+  ) return 'image/x-icon';
 
   if (
     buffer.length >= 12 &&
-    buffer[0] === 0x52 &&
-    buffer[1] === 0x49 &&
-    buffer[2] === 0x46 &&
-    buffer[3] === 0x46 &&
+    buffer[0] === 0x52 && buffer[1] === 0x49 &&
+    buffer[2] === 0x46 && buffer[3] === 0x46 &&
     buffer.subarray(8, 12).toString('ascii') === 'WEBP'
-  ) {
-    return 'image/webp';
-  }
+  ) return 'image/webp';
 
   if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
     const brand = buffer.subarray(8, 12).toString('ascii');
@@ -169,16 +185,13 @@ function detectContentType(buffer) {
 
 async function sha256Hex(data) {
   const input = Buffer.isBuffer(data) ? data : Buffer.from(data);
-
   try {
     if (subtle) {
       const view = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
       const digest = await subtle.digest('SHA-256', view);
       return Buffer.from(digest).toString('hex');
     }
-  } catch {
-    // Fall through
-  }
+  } catch {}
 
   if (typeof crypto.hash === 'function') {
     return crypto.hash('sha256', input, 'hex');
@@ -204,7 +217,6 @@ async function generateETag(req, targetUrl, upstreamHeaders, body) {
   const upstreamLen = upstreamHeaders?.['content-length'];
 
   let upstreamIdentity;
-
   if (upstreamEtag || upstreamLM) {
     upstreamIdentity = `${upstreamEtag || ''}|${upstreamLM || ''}|${upstreamLen || ''}`;
   } else {
@@ -213,44 +225,32 @@ async function generateETag(req, targetUrl, upstreamHeaders, body) {
 
   const material = Buffer.from(paramsFingerprint + '|' + upstreamIdentity);
   const digest = await sha256Hex(material);
-
   return `"${digest.slice(0, 32)}"`;
 }
 
-// F4: Adaptive decompression budget
 async function decompressBody(buffer, encoding) {
   if (!encoding) return buffer;
-
   const enc = String(encoding).toLowerCase().trim();
 
   let decompressor;
-
-  if (enc === 'gzip' || enc === 'x-gzip') {
-    decompressor = createGunzip();
-  } else if (enc === 'deflate') {
-    decompressor = createInflate();
-  } else if (enc === 'br') {
-    decompressor = createBrotliDecompress();
-  } else {
-    return buffer;
-  }
+  if (enc === 'gzip' || enc === 'x-gzip') decompressor = createGunzip();
+  else if (enc === 'deflate') decompressor = createInflate();
+  else if (enc === 'br') decompressor = createBrotliDecompress();
+  else return buffer;
 
   const maxDecompressed = memoryGovernor.getDecompressBudget();
 
   return new Promise((resolve, reject) => {
     const chunks = [];
     let totalLength = 0;
-
     const stream = Readable.from(buffer).pipe(decompressor);
 
     stream.on('data', (chunk) => {
       totalLength += chunk.length;
-
       if (totalLength > maxDecompressed) {
         stream.destroy(new Error('DECOMPRESS_BOMB'));
         return;
       }
-
       chunks.push(chunk);
     });
 
@@ -259,7 +259,6 @@ async function decompressBody(buffer, encoding) {
   });
 }
 
-// F4: Adaptive download limit
 async function consumeWithLimit(body) {
   const maxDownload = memoryGovernor.getDownloadBudget();
   const chunks = [];
@@ -267,25 +266,21 @@ async function consumeWithLimit(body) {
 
   for await (const chunk of body) {
     total += chunk.length;
-
     if (total > maxDownload) {
       body.destroy();
       const err = new Error('BODY_TOO_LARGE');
       err.code = 'BODY_TOO_LARGE';
       throw err;
     }
-
     chunks.push(chunk);
   }
 
   const finalBuffer = Buffer.allocUnsafe(total);
   let offset = 0;
-
   for (const chunk of chunks) {
     chunk.copy(finalBuffer, offset);
     offset += chunk.length;
   }
-
   return finalBuffer;
 }
 
@@ -310,7 +305,6 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
 
     if ([301, 302, 303, 307, 308].includes(statusCode)) {
       await body.dump().catch(() => {});
-
       const location = resHeaders['location'];
 
       if (!location) {
@@ -318,7 +312,6 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
       }
 
       let nextUrl;
-
       try {
         nextUrl = new URL(location, currentUrl).href;
       } catch {
@@ -350,13 +343,10 @@ export default async function proxy(req, res) {
   const startTime = Date.now();
   const reqId = req.id || 'unknown';
 
-  // F2-ADAPTIVE: Memory pressure gate
   if (memoryGovernor.isUnderPressure()) {
     res.setHeader('Retry-After', '10');
     return res.status(503).json({ error: 'Memory pressure. Try again shortly.' });
   }
-
-  // Express 5 natively exposes req.signal for client disconnects
 
   let targetUrl = req.opts?.url || req.query?.url;
 
@@ -387,15 +377,13 @@ export default async function proxy(req, res) {
     : req.query?.referer;
 
   let autoReferer = '';
-
   try {
     const parsedTarget = new URL(targetUrl);
     autoReferer = parsedTarget.origin;
   } catch {}
 
   const finalReferer = (queryReferer && typeof queryReferer === 'string')
-    ? queryReferer
-    : autoReferer;
+    ? queryReferer : autoReferer;
 
   const headers = {
     'user-agent': userAgent || getRandomUA(),
@@ -412,14 +400,12 @@ export default async function proxy(req, res) {
   };
 
   const vaultEntry = vaultGet(targetUrl);
-
   if (vaultEntry) {
     if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
     if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
   }
 
   let workerBase = process.env.CF_WORKER_URL || '';
-
   if (workerBase === 'undefined' || workerBase === 'null') workerBase = '';
   if (workerBase && !workerBase.startsWith('http')) workerBase = 'https://' + workerBase;
   if (workerBase.endsWith('/')) workerBase = workerBase.slice(0, -1);
@@ -430,7 +416,6 @@ export default async function proxy(req, res) {
 
   if (workerBase && workerBase.startsWith('https://')) {
     const internalKey = process.env.INTERNAL_KEY;
-
     if (internalKey) {
       isWorkerFetch = true;
       fetchUrl = `${workerBase}/raw?url=${encodeURIComponent(targetUrl)}`;
@@ -474,7 +459,6 @@ export default async function proxy(req, res) {
 
   if (statusCode === 403) {
     const retryHeaders = { ...activeHeaders, 'user-agent': getRandomUA() };
-
     try {
       response = await safeRequest(activeUrl, retryHeaders, req.signal);
       statusCode = response.statusCode;
@@ -492,7 +476,6 @@ export default async function proxy(req, res) {
       res.setHeader('X-Conditional-Fetch', '304_VAULT_HIT');
     } else {
       rawBody = toBuffer(response.body);
-
       const encoding = responseHeaders?.['content-encoding'];
 
       if (encoding) {
@@ -504,7 +487,6 @@ export default async function proxy(req, res) {
       }
     }
 
-    // F4: Adaptive size check
     const downloadBudget = memoryGovernor.getDownloadBudget();
     if (rawBody.length > downloadBudget) {
       return sendGhost(res, 3600);
@@ -513,52 +495,37 @@ export default async function proxy(req, res) {
     if (statusCode === 200 && rawBody.length <= RAW_VAULT_MAX_ENTRY) {
       const upstreamEtag = responseHeaders['etag'] || null;
       const upstreamLastModified = responseHeaders['last-modified'] || null;
-
       if (upstreamEtag || upstreamLastModified) {
         vaultSet(targetUrl, rawBody, upstreamEtag, upstreamLastModified);
       }
     }
 
-    // F3: Honor upstream cache-control
     const upstreamCacheControl = String(responseHeaders['cache-control'] || '').toLowerCase();
     const isNoStore = /no-store|private|no-cache/.test(upstreamCacheControl);
     const upstreamMaxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
     const upstreamMaxAge = upstreamMaxAgeMatch ? parseInt(upstreamMaxAgeMatch[1], 10) : null;
 
-    // MOVED UP: Debug check before ghost returns
     if (req.query?.debug === '1') {
       const preview = rawBody.slice(0, 512).toString('utf8', 0, 512).replace(/[^\x20-\x7E]/g, '');
       return res.status(200).json({
         status: statusCode,
         detectedType: detectContentType(rawBody),
         sizeBytes: rawBody.length,
-        preview: preview,
+        preview,
         requestId: reqId
       });
     }
-    
-    if (statusCode === 404 || statusCode === 410) {
-      return sendGhost(res, 86400);
-    }
 
-    if (statusCode === 403) {
-      return sendGhost(res, 3600);
-    }
-
-    if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) {
-      return sendGhost(res, 60);
-    }
+    if (statusCode === 404 || statusCode === 410) return sendGhost(res, 86400);
+    if (statusCode === 403) return sendGhost(res, 3600);
+    if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) return sendGhost(res, 60);
 
     const detectedType = detectContentType(rawBody);
-
-    if (!detectedType.startsWith('image/')) {
-      return sendGhost(res, 3600);
-    }
+    if (!detectedType.startsWith('image/')) return sendGhost(res, 3600);
 
     if (req.query?.debug === '1') {
       try {
         const metadata = await sharp(rawBody).metadata();
-
         const report = {
           status: statusCode,
           originType: detectedType,
@@ -576,7 +543,6 @@ export default async function proxy(req, res) {
           executionTimeMs: Date.now() - startTime,
           requestId: reqId
         };
-
         return res.status(200).json(report);
       } catch (err) {
         return res.status(500).json({
@@ -604,7 +570,6 @@ export default async function proxy(req, res) {
     res.setHeader('ETag', etag);
     res.setHeader('Vary', 'Accept, Accept-Encoding, Sec-CH-Save-Data');
 
-    // F3: Adaptive cache-control based on upstream policy
     if (isNoStore) {
       res.setHeader('Cache-Control', 'no-store');
     } else if (upstreamMaxAge !== null && upstreamMaxAge > 0) {
@@ -618,7 +583,6 @@ export default async function proxy(req, res) {
     req.opts.originType = detectedType;
 
     const requestedFormat = req.opts?.format;
-
     const formatMatchesDetected =
       (requestedFormat === 'jpeg' && detectedType === 'image/jpeg') ||
       (requestedFormat === 'webp' && detectedType === 'image/webp') ||
@@ -632,7 +596,77 @@ export default async function proxy(req, res) {
     }
 
     if (shouldCompress(req, rawBody, memoryGovernor)) {
-      const compressedResult = await compress(req, res, rawBody, memoryGovernor);
+      let compressedResult = null;
+      let compressError = null;
+
+      try {
+        compressedResult = await compress(req, res, rawBody, memoryGovernor);
+      } catch (err) {
+        compressError = err;
+      }
+
+      // FEATURE: Corrupted Image Auto-Retry
+      if (compressError && ENABLE_CORRUPT_RETRY && isSharpDecodeError(compressError)) {
+        res.setHeader('X-Corrupt-Retry', 'TRIGGERED');
+        console.error(`[CORRUPT RETRY] [${reqId}] Decode failure detected, retrying with new UA`);
+
+        let retrySuccess = false;
+
+        for (let attempt = 1; attempt <= MAX_DECODE_RETRIES; attempt++) {
+          if (req.signal.aborted) return;
+
+          try {
+            const retryHeaders = {
+              ...activeHeaders,
+              'user-agent': getRandomUA(),
+              'cache-control': 'no-cache'
+            };
+
+            const retryResponse = await safeRequest(activeUrl, retryHeaders, req.signal);
+            const retryBody = toBuffer(retryResponse.body);
+
+            if (retryBody.length < 100) continue;
+
+            const retryEncoding = retryResponse.headers?.['content-encoding'];
+            let decompressedRetry = retryBody;
+
+            if (retryEncoding) {
+              try {
+                decompressedRetry = await decompressBody(retryBody, retryEncoding);
+              } catch {
+                continue;
+              }
+            }
+
+            const retryBudget = memoryGovernor.getDownloadBudget();
+            if (decompressedRetry.length > retryBudget) continue;
+
+            const retryType = detectContentType(decompressedRetry);
+            if (!retryType.startsWith('image/')) continue;
+
+            // Retry compress with fresh body
+            compressedResult = await compress(req, res, decompressedRetry, memoryGovernor);
+            retrySuccess = true;
+            res.setHeader('X-Corrupt-Retry', `SUCCESS_ATTEMPT_${attempt}`);
+            rawBody = decompressedRetry;
+            break;
+          } catch (retryErr) {
+            if (req.signal.aborted) return;
+            if (!isSharpDecodeError(retryErr)) {
+              compressedResult = null;
+              break;
+            }
+            res.setHeader('X-Corrupt-Retry', `FAILED_ATTEMPT_${attempt}`);
+          }
+        }
+
+        if (!retrySuccess && !compressedResult) {
+          console.error(`[CORRUPT RETRY] [${reqId}] All retry attempts exhausted`);
+          return sendGhost(res, 3600);
+        }
+      } else if (compressError) {
+        throw compressError;
+      }
 
       if (!res.writableEnded) {
         if (compressedResult && compressedResult.length > 0) {
@@ -672,9 +706,7 @@ export default async function proxy(req, res) {
       return sendGhost(res, 60);
     }
 
-    // F15: Sanitized error logging with request ID
     console.error(`[PROXY ERROR] [${reqId}]`, sanitizeError(error));
-
     return sendGhost(res, 60);
   }
 }
