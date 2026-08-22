@@ -44,6 +44,10 @@ const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 60000);
 const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
 const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 1200);
 
+// Approved Item 2: Accurate large-image analysis buffer capping
+const ANALYSIS_MAX_DIM = safeInt(process.env.ANALYSIS_MAX_DIM, 4096);
+const ANALYSIS_MAX_PIXELS = safeInt(process.env.ANALYSIS_MAX_PIXELS, 16_000_000);
+
 const metrics = {
   startTime: Date.now(),
   totalRequests: 0,
@@ -754,10 +758,40 @@ async function detectLineArt(buffer, analysis) {
   }
 }
 
+// Approved Item 2: Accurate large-image analysis buffer capping
 async function detectImageType(buffer, metadata) {
-  const statsSource = metadata.width > 4096 || metadata.height > 4096
-    ? await sharp(buffer).resize(4096, 4096, { fit: 'inside', withoutEnlargement: true }).toBuffer()
-    : buffer;
+  const width = metadata.width || 0;
+  const height = metadata.height || 0;
+
+  let analysisWidth = width;
+  let analysisHeight = height;
+
+  if (width > ANALYSIS_MAX_DIM || height > ANALYSIS_MAX_DIM) {
+    const scale = Math.min(
+      ANALYSIS_MAX_DIM / Math.max(width, 1),
+      ANALYSIS_MAX_DIM / Math.max(height, 1)
+    );
+
+    analysisWidth = Math.max(1, Math.round(width * scale));
+    analysisHeight = Math.max(1, Math.round(height * scale));
+  }
+
+  const analysisPixels = analysisWidth * analysisHeight;
+
+  if (analysisPixels > ANALYSIS_MAX_PIXELS) {
+    const scale = Math.sqrt(ANALYSIS_MAX_PIXELS / analysisPixels);
+
+    analysisWidth = Math.max(1, Math.round(analysisWidth * scale));
+    analysisHeight = Math.max(1, Math.round(analysisHeight * scale));
+  }
+
+  const statsSource =
+    analysisWidth < width || analysisHeight < height
+      ? await sharp(buffer).resize(analysisWidth, analysisHeight, {
+          fit: 'inside',
+          withoutEnlargement: true
+        }).toBuffer()
+      : buffer;
 
   const stats = await sharp(statsSource).stats();
   const { channels } = stats;
@@ -836,7 +870,7 @@ function getViewportMaxDim(req) {
 function getChromaSubsampling(analysis) {
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
   return '4:2:0';
-    }
+}
 
 // ============================================================
 // FORCED FORMAT SELECTOR
@@ -870,7 +904,7 @@ function chooseOutputFormat(metadata, totalPixelCost) {
 
   // Over pixel cap: resize down to fit, still use AVIF
   return { format: 'avif', reason: 'avif_resized_to_fit' };
- } 
+} 
 
 // ============================================================
 // MAIN COMPRESS FUNCTION
@@ -1711,4 +1745,4 @@ export default async function compress(req, res, buffer, governor) {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     activeRequests--;
   }
-                  }
+    }
