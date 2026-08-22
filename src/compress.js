@@ -1354,11 +1354,13 @@ export default async function compress(req, res, buffer, governor) {
             jagged: sharpenJagged,
           });
 
+          res.setHeader('X-Sharpen', isTextHeavy ? 'BOOSTED' : 'APPLIED');
+
           if (isTextHeavy) {
             res.setHeader('X-Text-Sharpen', 'BOOSTED');
           }
         }
-      }
+       } 
 
       // Alpha handling
       if (alphaStrippable) {
@@ -1538,12 +1540,41 @@ export default async function compress(req, res, buffer, governor) {
         analysis.isAnime ? 'anime' :
         analysis.isGrayscale ? 'grayscale' : 'photo');
 
-      // Vercel log: image analysis summary
+      const getHeaderStr = (name) => {
+        const v = res.getHeader(name);
+        return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
+      };
+
+      const enhancementState = {
+        deskew: getHeaderStr('X-Deskew-Angle') || false,
+        moire: getHeaderStr('X-Moire-Removed') === 'true',
+        lineDenoise: getHeaderStr('X-Line-Denoise') === 'true',
+        luminanceFix: getHeaderStr('X-Luminance-Fix') || false,
+        ghostStripper: getHeaderStr('X-Ghost-Stripper') || false,
+        bandingExorcist: getHeaderStr('X-Banding-Exorcist') === 'ACTIVE',
+        alphaSentinel: getHeaderStr('X-Alpha-Sentinel') === 'STRIPPED',
+        sharpen: getHeaderStr('X-Sharpen') || false,
+        textPreservation: getHeaderStr('X-Text-Preservation') === 'ACTIVE',
+        textSharpen: getHeaderStr('X-Text-Sharpen') === 'BOOSTED',
+        hdrConversion: getHeaderStr('X-HDR-Conversion') === 'ACTIVE',
+        hdrToneMap: getHeaderStr('X-HDR-ToneMap') || false,
+        alphaTrim: getHeaderStr('X-Alpha-Trim') === 'ACTIVE',
+        alphaTrimPad: getHeaderStr('X-Alpha-Trim-Pad') || false,
+        frameDrop: getHeaderStr('X-Frame-Drop') || false,
+        metadataReaper: ENABLE_METADATA_REAPER,
+        safeMetadata: ENABLE_SAFE_METADATA
+      };
+
+      const appliedEnhancements = Object.keys(enhancementState).filter((key) => {
+        const value = enhancementState[key];
+        return value === true || (typeof value === 'string' && value.length > 0 && value !== 'false');
+      });
+
       console.log(JSON.stringify({
         event: 'COMPRESS',
-        reqId: reqId,
-        activeRequests: activeRequests,
-        activeEncodes: activeEncodes,
+        reqId,
+        activeRequests,
+        activeEncodes,
         url: (() => {
           try {
             const u = new URL(req.opts?.url);
@@ -1553,8 +1584,8 @@ export default async function compress(req, res, buffer, governor) {
           }
         })(),
         format: outputFormat,
-        quality: quality,
-        effort: effort,
+        quality,
+        effort,
         chronosState: chronos.state,
         grade: judgeResult ? judgeResult.grade : null,
         score: judgeResult ? judgeResult.score : null,
@@ -1570,15 +1601,13 @@ export default async function compress(req, res, buffer, governor) {
           analysis.isMangaPage ? 'manga-page' :
           analysis.isAnime ? 'anime' :
           analysis.isGrayscale ? 'grayscale' : 'photo',
-        frames: frames,
-        mode: mode,
-        cpuPressure: cpuPressure,
+        frames,
+        mode,
+        cpuPressure,
         cpuLagMs: Math.round(eventLoopLag * 100) / 100,
-        hdrConversion: needsHDRConversion,
-        textPreservation: isTextHeavy,
-        alphaTrim: Boolean(alphaBounds),
-        frameDrop: frameDropActive,
-        safeMetadata: ENABLE_SAFE_METADATA
+        cpuPressureDisabledEnhancements: cpuPressure,
+        enhancements: enhancementState,
+        appliedEnhancements
       }));
 
       res.setHeader('Content-Length', outputBuffer.length);
