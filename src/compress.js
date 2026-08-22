@@ -15,7 +15,6 @@ function safeFloat(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-// Serverless functions die too fast for caching to matter. Free the RAM.
 sharp.cache({ memory: 0, files: 0, items: 0 });
 
 async function generateExactHash(buffer) {
@@ -24,7 +23,6 @@ async function generateExactHash(buffer) {
       const digest = await subtle.digest('SHA-256', buffer);
       return Buffer.from(digest).toString('hex').slice(0, 16);
     }
-
     return createHash('sha256').update(buffer).digest('hex').slice(0, 16);
   } catch {
     return null;
@@ -40,13 +38,34 @@ const HEALTH_LAG_THRESHOLD = safeInt(process.env.HEALTH_LAG_THRESHOLD, 100);
 const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
 const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 60000);
 
-// Sharp AVIF hard limit is UNKNOWN, so these are conservative safety limits.
 const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
 const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 1200);
 
-// Approved Item 2: Accurate large-image analysis buffer capping
 const ANALYSIS_MAX_DIM = safeInt(process.env.ANALYSIS_MAX_DIM, 4096);
 const ANALYSIS_MAX_PIXELS = safeInt(process.env.ANALYSIS_MAX_PIXELS, 16_000_000);
+
+// FEATURE: CPU/event-loop pressure governor
+const CPU_LAG_THRESHOLD_MS = safeInt(process.env.CPU_LAG_THRESHOLD_MS, 80);
+
+// FEATURE: HDR/wide-gamut safe downconversion
+const ENABLE_HDR_SAFE_CONVERSION = envBool('ENABLE_HDR_SAFE_CONVERSION', true);
+
+// FEATURE: Text/OCR Region Preservation
+const ENABLE_TEXT_PRESERVATION = envBool('ENABLE_TEXT_PRESERVATION', true);
+const TEXT_SHARPNESS_THRESHOLD = safeInt(process.env.TEXT_SHARPNESS_THRESHOLD, 55);
+const TEXT_ENTROPY_MAX = safeFloat(process.env.TEXT_ENTROPY_MAX, 6.0);
+const TEXT_QUALITY_BOOST = safeInt(process.env.TEXT_QUALITY_BOOST, 15);
+
+// FEATURE: Smart Alpha Channel Trimming
+const ENABLE_ALPHA_TRIM = envBool('ENABLE_ALPHA_TRIM', true);
+const ALPHA_TRIM_MAX_PIXELS = safeInt(process.env.ALPHA_TRIM_MAX_PIXELS, 8_000_000);
+
+// FEATURE: Animated Frame Dropping
+const ENABLE_FRAME_DROPPING = envBool('ENABLE_FRAME_DROPPING', true);
+const FRAME_DROP_THRESHOLD = safeInt(process.env.FRAME_DROP_THRESHOLD, 50);
+
+// FEATURE: Safe Metadata Exceptions
+const ENABLE_SAFE_METADATA = envBool('ENABLE_SAFE_METADATA', true);
 
 const metrics = {
   startTime: Date.now(),
@@ -61,11 +80,12 @@ const metrics = {
   memoryRejections: 0,
   voidDetections: 0,
   encodingFailures: 0,
-  formatCounts: {
-    avif: 0,
-    webp: 0,
-    jpeg: 0
-  },
+  cpuPressureEvents: 0,
+  hdrConversions: 0,
+  textPreservations: 0,
+  alphaTrims: 0,
+  frameDrops: 0,
+  formatCounts: { avif: 0, webp: 0, jpeg: 0 },
   featureActivations: {
     deskew: 0,
     alphaSentinel: 0,
@@ -90,18 +110,12 @@ function recordMetric(key, value = 1) {
 
 export function getMetrics() {
   const uptime = Date.now() - metrics.startTime;
-
   const avgEncodeTime = metrics.encodeCount > 0
-    ? Math.round(metrics.totalEncodeTime / metrics.encodeCount)
-    : 0;
-
+    ? Math.round(metrics.totalEncodeTime / metrics.encodeCount) : 0;
   const cacheHitRate = metrics.totalRequests > 0
-    ? ((metrics.cacheHits / metrics.totalRequests) * 100).toFixed(2) + '%'
-    : '0%';
-
+    ? ((metrics.cacheHits / metrics.totalRequests) * 100).toFixed(2) + '%' : '0%';
   const compressionRatio = metrics.totalBytesIn > 0
-    ? ((1 - metrics.totalBytesOut / metrics.totalBytesIn) * 100).toFixed(2) + '%'
-    : '0%';
+    ? ((1 - metrics.totalBytesOut / metrics.totalBytesIn) * 100).toFixed(2) + '%' : '0%';
 
   return {
     uptime: `${Math.floor(uptime / 1000)}s`,
@@ -117,6 +131,11 @@ export function getMetrics() {
     memoryRejections: metrics.memoryRejections,
     voidDetections: metrics.voidDetections,
     encodingFailures: metrics.encodingFailures,
+    cpuPressureEvents: metrics.cpuPressureEvents,
+    hdrConversions: metrics.hdrConversions,
+    textPreservations: metrics.textPreservations,
+    alphaTrims: metrics.alphaTrims,
+    frameDrops: metrics.frameDrops,
     formatCounts: metrics.formatCounts,
     featureActivations: metrics.featureActivations,
     activeRequests,
@@ -135,11 +154,9 @@ export function getMetrics() {
 export function checkHealth() {
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
-
     setImmediate(() => {
       const lag = Number(process.hrtime.bigint() - start) / 1e6;
       const healthy = lag < HEALTH_LAG_THRESHOLD;
-
       resolve({
         healthy,
         eventLoopLag: `${lag.toFixed(2)}ms`,
@@ -160,20 +177,12 @@ export function checkHealth() {
 
 function gracefulShutdown(signal) {
   if (isShuttingDown) return;
-
   isShuttingDown = true;
-  console.log(`[GUILLOTINE-GRACE] ${signal} received. Shutting down gracefully.`);
-
-  const forceTimeout = setTimeout(() => {
-    console.log('[GUILLOTINE-GRACE] Timeout reached. Forcing shutdown.');
-    process.exit(1);
-  }, SHUTDOWN_TIMEOUT);
-
+  const forceTimeout = setTimeout(() => process.exit(1), SHUTDOWN_TIMEOUT);
   const checkInterval = setInterval(() => {
     if (activeRequests === 0 && activeEncodes === 0) {
       clearTimeout(forceTimeout);
       clearInterval(checkInterval);
-      console.log('[GUILLOTINE-GRACE] All requests completed. Exiting.');
       process.exit(0);
     }
   }, 100);
@@ -184,33 +193,24 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 const exactCache = new LRUCache({
   max: 20,
-  maxSize: 20 * 1024 * 1024, // Shrink to 20MB
+  maxSize: 20 * 1024 * 1024,
   sizeCalculation: (entry) => entry.buffer.length
 });
 
 // ============================================================
-// CHRONOS v2 — pixel/format aware, no blind effort 9
+// CHRONOS v2
 // ============================================================
-
 const CHRONOS_WINDOW = 10;
-
-const rollingByFormat = {
-  avif: [],
-  webp: []
-};
+const rollingByFormat = { avif: [], webp: [] };
 
 function recordEncodeTime(ms, pixelCount, format) {
   if (format !== 'avif' && format !== 'webp') return;
   if (!Number.isFinite(ms) || ms <= 0) return;
   if (!Number.isFinite(pixelCount) || pixelCount <= 0) pixelCount = 1;
-
   const mp = pixelCount / 1_000_000;
   const msPerMegapixel = ms / Math.max(mp, 0.1);
-
   if (!rollingByFormat[format]) rollingByFormat[format] = [];
-
   rollingByFormat[format].push(msPerMegapixel);
-
   if (rollingByFormat[format].length > CHRONOS_WINDOW) {
     rollingByFormat[format].shift();
   }
@@ -218,94 +218,53 @@ function recordEncodeTime(ms, pixelCount, format) {
 
 function getAverageMsPerMegapixel(format) {
   const arr = rollingByFormat[format] || [];
-
   if (arr.length === 0) return 0;
-
   return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
 function getColdStartEffort(pixelCount, outputFormat) {
   const mp = pixelCount / 1_000_000;
-
   if (outputFormat === 'avif') {
-    if (mp <= 1)   return 8;
-    if (mp <= 2)   return 7;
-    if (mp <= 3)   return 7;
-    if (mp <= 4)   return 6;
-    if (mp <= 6)   return 5;
-    if (mp <= 8)   return 4;
-    if (mp <= 10)  return 3;
-    if (mp <= 12)  return 2;
-    if (mp <= 15)  return 2;
-    if (mp <= 18)  return 2;
-    if (mp <= 22)  return 2;
-    if (mp <= 30)  return 2;
-    if (mp <= 40)  return 2;
-    if (mp <= 50)  return 2;
+    if (mp <= 1) return 8;
+    if (mp <= 3) return 7;
+    if (mp <= 6) return 5;
+    if (mp <= 10) return 3;
     return 2;
   }
-
   if (outputFormat === 'webp') {
-    if (mp <= 1)   return 6;
-    if (mp <= 2)   return 6;
-    if (mp <= 4)   return 6;
-    if (mp <= 6)   return 5;
-    if (mp <= 8)   return 5;
-    if (mp <= 10)  return 5;
-    if (mp <= 15)  return 4;
-    if (mp <= 20)  return 4;
-    if (mp <= 30)  return 3;
-    if (mp <= 40)  return 3;
+    if (mp <= 2) return 6;
+    if (mp <= 8) return 5;
+    if (mp <= 20) return 4;
     return 2;
   }
-
   return 4;
 }
 
 function getChronosState(pixelCount, outputFormat) {
   const samples = rollingByFormat[outputFormat] || [];
-  const mp = pixelCount / 1_000_000;
-
   if (samples.length < 3) {
-    return {
-      state: 'COLD',
-      effort: getColdStartEffort(pixelCount, outputFormat)
-    };
+    return { state: 'COLD', effort: getColdStartEffort(pixelCount, outputFormat) };
   }
-
   const avg = getAverageMsPerMegapixel(outputFormat);
-
-  // AVIF (libaom) is inherently slow. Thresholds reflect real-world AV1 encoding.
   if (outputFormat === 'avif') {
     if (avg < 300) return { state: 'FAST', effort: 9 };
-    if (avg < 600) return { state: 'SWIFT', effort: 8 };
     if (avg < 1200) return { state: 'NORMAL', effort: 7 };
-    if (avg < 2500) return { state: 'LIGHT', effort: 6 };
     if (avg < 5000) return { state: 'MODERATE', effort: 5 };
-    if (avg < 8000) return { state: 'HEAVY', effort: 4 };
     if (avg < 12000) return { state: 'SEVERE', effort: 3 };
     return { state: 'CRITICAL', effort: 2 };
   }
-
-  // WebP (libwebp) is much faster.
   if (outputFormat === 'webp') {
-    if (avg < 20) return { state: 'FAST', effort: 6 }; // WebP max effort is 6
     if (avg < 50) return { state: 'SWIFT', effort: 6 };
-    if (avg < 100) return { state: 'NORMAL', effort: 5 };
     if (avg < 200) return { state: 'LIGHT', effort: 5 };
-    if (avg < 400) return { state: 'MODERATE', effort: 4 };
     if (avg < 800) return { state: 'HEAVY', effort: 3 };
     return { state: 'SEVERE', effort: 2 };
   }
-
-  // Fallback
   return { state: 'NORMAL', effort: 4 };
 }
 
 // ============================================================
 // FEATURE FLAGS
 // ============================================================
-
 function envBool(name, fallback = false) {
   const v = process.env[name];
   if (v === undefined) return fallback;
@@ -314,7 +273,6 @@ function envBool(name, fallback = false) {
 
 const FORCE_GRAYSCALE = envBool('FORCE_GRAYSCALE', false);
 const STRIP_ALPHA = envBool('STRIP_ALPHA', true);
-
 const ENABLE_PLACEHOLDER = envBool('ENABLE_PLACEHOLDER', true);
 const ENABLE_PALETTE = envBool('ENABLE_PALETTE', true);
 const ENABLE_VOID_WATCHER = envBool('ENABLE_VOID_WATCHER', true);
@@ -335,24 +293,133 @@ const ENABLE_DIMENSION_OVERLORD = envBool('ENABLE_DIMENSION_OVERLORD', true);
 const ENABLE_ORACLE_LEDGER = envBool('ENABLE_ORACLE_LEDGER', true);
 
 function parseTriState(value, defaultValue) {
-  if (Array.isArray(value)) {
-    value = value[0];
-  }
-
+  if (Array.isArray(value)) value = value[0];
   if (value === undefined) return defaultValue;
-
   const str = String(value).trim().toLowerCase();
-
   if (['1', 'true', 'yes', 'on'].includes(str)) return true;
   if (['0', 'false', 'no', 'off'].includes(str)) return false;
-
   return defaultValue;
 }
 
 // ============================================================
-// ANALYSIS HELPERS
+// FEATURE: CPU/event-loop pressure governor helper
 // ============================================================
+async function measureEventLoopLag() {
+  return new Promise((resolve) => {
+    const start = process.hrtime.bigint();
+    setImmediate(() => {
+      const lag = Number(process.hrtime.bigint() - start) / 1e6;
+      resolve(lag);
+    });
+  });
+}
 
+// ============================================================
+// FEATURE: Smart Alpha Channel Trimming helper
+// ============================================================
+async function detectAlphaBounds(buffer, metadata) {
+  if (!metadata.hasAlpha) return null;
+
+  const pixelCount = (metadata.width || 0) * (metadata.height || 0);
+  if (pixelCount > ALPHA_TRIM_MAX_PIXELS) return null;
+
+  try {
+    const sampleDim = 256;
+    const { data, info } = await sharp(buffer)
+      .resize(sampleDim, sampleDim, { fit: 'inside', withoutEnlargement: true })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const w = info.width;
+    const h = info.height;
+    const channels = info.channels;
+    const alphaIdx = channels - 1;
+
+    let minX = w, minY = h, maxX = 0, maxY = 0;
+    let foundOpaque = false;
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const alpha = data[(y * w + x) * channels + alphaIdx];
+        if (alpha > 0) {
+          foundOpaque = true;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (!foundOpaque) return null;
+    if (minX >= maxX || minY >= maxY) return null;
+
+    // Check if trim would save meaningful space (at least 5% on any side)
+    const trimLeft = minX / w;
+    const trimTop = minY / h;
+    const trimRight = (w - 1 - maxX) / w;
+    const trimBottom = (h - 1 - maxY) / h;
+
+    if (trimLeft < 0.02 && trimTop < 0.02 && trimRight < 0.02 && trimBottom < 0.02) {
+      return null;
+    }
+
+    const scaleX = metadata.width / w;
+    const scaleY = metadata.height / h;
+
+    return {
+      left: Math.max(0, Math.floor(minX * scaleX)),
+      top: Math.max(0, Math.floor(minY * scaleY)),
+      width: Math.min(metadata.width, Math.ceil((maxX - minX + 1) * scaleX)),
+      height: Math.min(metadata.height, Math.ceil((maxY - minY + 1) * scaleY)),
+      originalWidth: metadata.width,
+      originalHeight: metadata.height,
+      padLeft: Math.floor(minX * scaleX),
+      padTop: Math.floor(minY * scaleY),
+      padRight: Math.max(0, metadata.width - Math.ceil((maxX + 1) * scaleX)),
+      padBottom: Math.max(0, metadata.height - Math.ceil((maxY + 1) * scaleY))
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================
+// FEATURE: Text/OCR detection helper
+// ============================================================
+function isTextHeavyImage(analysis) {
+  if (!analysis) return false;
+  const sharpness = analysis.sharpness || 0;
+  const entropy = analysis.entropy || 0;
+  const colorVariance = analysis.colorVariance || 0;
+
+  // Text/OCR heuristic: high sharpness, low entropy, low color variance
+  return sharpness > TEXT_SHARPNESS_THRESHOLD &&
+         entropy < TEXT_ENTROPY_MAX &&
+         colorVariance < 40;
+}
+
+// ============================================================
+// FEATURE: HDR/wide-gamut detection helper
+// ============================================================
+function detectHDRCharacteristics(metadata) {
+  const space = (metadata.space || '').toLowerCase();
+  const depth = metadata.depth || 'uchar';
+  const hasICC = Boolean(metadata.icc);
+
+  const wideGamutSpaces = ['display-p3', 'adobe-rgb', 'prophoto-rgb', 'rec2020', 'a98-rgb'];
+  const isWideGamut = wideGamutSpaces.includes(space);
+
+  // 16-bit depth with ICC profile is a strong HDR indicator
+  const isHighBitDepth = depth === 'ushort' || depth === 'uint' || depth === 'float';
+  const isPotentialHDR = isHighBitDepth && hasICC;
+
+  return { isWideGamut, isPotentialHDR, space, depth, hasICC };
+}
+
+// ============================================================
+// ANALYSIS HELPERS (existing)
+// ============================================================
 async function generatePlaceholderAndPalette(buffer) {
   try {
     const { data, info } = await sharp(buffer)
@@ -361,20 +428,15 @@ async function generatePlaceholderAndPalette(buffer) {
       .toBuffer({ resolveWithObject: true });
 
     const channels = info.channels;
-    let sum = 0;
-    let sumSq = 0;
+    let sum = 0, sumSq = 0;
     const pixelCount = data.length / channels;
     const colorCounts = new Map();
 
     for (let i = 0; i < data.length; i += channels) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-
+      const r = data[i], g = data[i + 1], b = data[i + 2];
       const lum = 0.299 * r + 0.587 * g + 0.114 * b;
       sum += lum;
       sumSq += lum * lum;
-
       const colorKey = (r << 16) | (g << 8) | b;
       colorCounts.set(colorKey, (colorCounts.get(colorKey) || 0) + 1);
     }
@@ -384,10 +446,8 @@ async function generatePlaceholderAndPalette(buffer) {
     const isVoid = stdev < 1;
 
     let palette = [];
-
     if (!isVoid) {
       const sorted = [...colorCounts.entries()].sort((a, b) => b[1] - a[1]);
-
       palette = sorted.slice(0, 3).map(([colorKey]) => {
         const hex = colorKey.toString(16).padStart(6, '0');
         return `#${hex}`;
@@ -395,7 +455,6 @@ async function generatePlaceholderAndPalette(buffer) {
     }
 
     let placeholder = null;
-
     if (ENABLE_PLACEHOLDER && !isVoid) {
       const thumbBuffer = await sharp(buffer)
         .resize(32, 32, { fit: 'inside' })
@@ -403,7 +462,6 @@ async function generatePlaceholderAndPalette(buffer) {
         .grayscale()
         .jpeg({ quality: 20 })
         .toBuffer();
-
       placeholder = 'data:image/jpeg;base64,' + thumbBuffer.toString('base64');
     }
 
@@ -421,35 +479,18 @@ async function detectSkew(buffer) {
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const w = info.width;
-    const h = info.height;
-
-    const corners = [
-      data[0],
-      data[w - 1],
-      data[(h - 1) * w],
-      data[h * w - 1]
-    ];
-
+    const w = info.width, h = info.height;
+    const corners = [data[0], data[w - 1], data[(h - 1) * w], data[h * w - 1]];
     const bgValue = corners.reduce((a, b) => a + b, 0) / 4;
 
-    let sumX = 0;
-    let sumY = 0;
-    let sumXX = 0;
-    let sumYY = 0;
-    let sumXY = 0;
-    let count = 0;
+    let sumX = 0, sumY = 0, sumXX = 0, sumYY = 0, sumXY = 0, count = 0;
 
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const v = data[y * w + x];
-
         if (Math.abs(v - bgValue) > 30) {
-          sumX += x;
-          sumY += y;
-          sumXX += x * x;
-          sumYY += y * y;
-          sumXY += x * y;
+          sumX += x; sumY += y;
+          sumXX += x * x; sumYY += y * y; sumXY += x * y;
           count++;
         }
       }
@@ -457,18 +498,13 @@ async function detectSkew(buffer) {
 
     if (count < 100) return 0;
 
-    const meanX = sumX / count;
-    const meanY = sumY / count;
+    const meanX = sumX / count, meanY = sumY / count;
     const covXX = sumXX / count - meanX * meanX;
     const covYY = sumYY / count - meanY * meanY;
     const covXY = sumXY / count - meanX * meanY;
-
     const angle = 0.5 * Math.atan2(2 * covXY, covXX - covYY) * (180 / Math.PI);
 
-    if (Math.abs(angle) > 1.5 && Math.abs(angle) < 15) {
-      return angle;
-    }
-
+    if (Math.abs(angle) > 1.5 && Math.abs(angle) < 15) return angle;
     return 0;
   } catch {
     return 0;
@@ -476,38 +512,28 @@ async function detectSkew(buffer) {
 }
 
 let _noiseTilePromise = null;
-
 function getNoiseTile() {
   if (!_noiseTilePromise) {
     _noiseTilePromise = (async () => {
-      const size = 128;
-      const channels = 4;
+      const size = 128, channels = 4;
       const data = Buffer.alloc(size * size * channels);
-
       for (let i = 0; i < size * size; i++) {
         const noise = Math.floor(Math.random() * 256);
-
         data[i * channels] = noise;
         data[i * channels + 1] = noise;
         data[i * channels + 2] = noise;
         data[i * channels + 3] = 6;
       }
-
-      return sharp(data, {
-        raw: { width: size, height: size, channels: channels }
-      }).png().toBuffer();
+      return sharp(data, { raw: { width: size, height: size, channels } }).png().toBuffer();
     })();
   }
-
   return _noiseTilePromise;
 }
 
 async function detectAlphaStrippable(buffer, metadata) {
   if (!metadata.hasAlpha) return false;
-
   try {
     const sampleSize = 64;
-
     const { data, info } = await sharp(buffer)
       .resize(sampleSize, sampleSize, { fit: 'inside' })
       .raw()
@@ -523,7 +549,6 @@ async function detectAlphaStrippable(buffer, metadata) {
         if (minAlpha < 255) return false;
       }
     }
-
     return minAlpha === 255;
   } catch {
     return false;
@@ -532,31 +557,14 @@ async function detectAlphaStrippable(buffer, metadata) {
 
 function verifyOutput(buffer, format) {
   if (!buffer || buffer.length < 100) return false;
-
   switch (format) {
     case 'jpeg':
       return buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
-
     case 'webp':
-      return (
-        buffer[0] === 0x52 &&
-        buffer[1] === 0x49 &&
-        buffer[2] === 0x46 &&
-        buffer[3] === 0x46 &&
-        buffer[8] === 0x57 &&
-        buffer[9] === 0x45 &&
-        buffer[10] === 0x42 &&
-        buffer[11] === 0x50
-      );
-
+      return buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+             buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50;
     case 'avif':
-      return (
-        buffer[4] === 0x66 &&
-        buffer[5] === 0x74 &&
-        buffer[6] === 0x79 &&
-        buffer[7] === 0x70
-      );
-
+      return buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70;
     default:
       return true;
   }
@@ -564,15 +572,10 @@ function verifyOutput(buffer, format) {
 
 function getWebpPreset(analysis, lineArtResult, origW, origH) {
   if (!ENABLE_WEBP_PRESET) return 'default';
-
-  if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) {
-    return 'drawing';
-  }
-
+  if (lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) return 'drawing';
   if (analysis.isAnime) return 'picture';
   if (analysis.entropy > 7.5) return 'photo';
   if (origW < 256 && origH < 256) return 'icon';
-
   return 'default';
 }
 
@@ -582,13 +585,11 @@ function judgeQuality(analysis, metadata) {
   const height = metadata.height || 0;
   const entropy = analysis.entropy || 0;
   const colorVariance = analysis.colorVariance || 0;
-
   const aspectRatio = height / Math.max(width, 1);
   const isVerticalStrip = aspectRatio > 2.5;
   const resolution = isVerticalStrip ? width : Math.max(width, height);
 
   let score = 0;
-
   if (sharpness > 80) score += 35;
   else if (sharpness > 60) score += 28;
   else if (sharpness > 40) score += 21;
@@ -611,7 +612,6 @@ function judgeQuality(analysis, metadata) {
   else if (colorVariance < 15) score -= 10;
 
   let grade, qualityAdjust;
-
   if (score >= 90) { grade = 'S'; qualityAdjust = -15; }
   else if (score >= 75) { grade = 'A'; qualityAdjust = -10; }
   else if (score >= 60) { grade = 'B'; qualityAdjust = -5; }
@@ -624,18 +624,11 @@ function judgeQuality(analysis, metadata) {
 }
 
 async function detectHalftone(buffer, metadata, analysis) {
-  if (analysis.colorVariance > 50) {
-    return { isHalftone: false, confidence: 0 };
-  }
-
+  if (analysis.colorVariance > 50) return { isHalftone: false, confidence: 0 };
   try {
-    const width = metadata.width;
-    const height = metadata.height;
+    const width = metadata.width, height = metadata.height;
     const sampleSize = Math.min(200, Math.min(width, height));
-
-    if (sampleSize < 32) {
-      return { isHalftone: false, confidence: 0 };
-    }
+    if (sampleSize < 32) return { isHalftone: false, confidence: 0 };
 
     const left = Math.floor((width - sampleSize) / 2);
     const top = Math.floor((height - sampleSize) / 2);
@@ -646,77 +639,51 @@ async function detectHalftone(buffer, metadata, analysis) {
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    let microSum = 0;
-    let microCount = 0;
-
+    let microSum = 0, microCount = 0;
     for (let y = 0; y < sampleSize - 2; y += 3) {
       for (let x = 0; x < sampleSize - 2; x += 3) {
-        let sum = 0;
-        let sumSq = 0;
-
+        let sum = 0, sumSq = 0;
         for (let dy = 0; dy < 3; dy++) {
           for (let dx = 0; dx < 3; dx++) {
             const v = data[(y + dy) * sampleSize + (x + dx)];
-            sum += v;
-            sumSq += v * v;
+            sum += v; sumSq += v * v;
           }
         }
-
         const mean = sum / 9;
-        const variance = sumSq / 9 - mean * mean;
-        microSum += variance;
+        microSum += sumSq / 9 - mean * mean;
         microCount++;
       }
     }
-
     const microVariance = microSum / Math.max(microCount, 1);
 
-    let macroSum = 0;
-    let macroCount = 0;
+    let macroSum = 0, macroCount = 0;
     const macroSize = Math.min(24, sampleSize);
-
     for (let y = 0; y < sampleSize - macroSize + 1; y += macroSize) {
       for (let x = 0; x < sampleSize - macroSize + 1; x += macroSize) {
-        let sum = 0;
-        let sumSq = 0;
-        let count = 0;
-
+        let sum = 0, sumSq = 0, count = 0;
         for (let dy = 0; dy < macroSize; dy++) {
           for (let dx = 0; dx < macroSize; dx++) {
             const v = data[(y + dy) * sampleSize + (x + dx)];
-            sum += v;
-            sumSq += v * v;
-            count++;
+            sum += v; sumSq += v * v; count++;
           }
         }
-
         const mean = sum / count;
-        const variance = sumSq / count - mean * mean;
-        macroSum += variance;
+        macroSum += sumSq / count - mean * mean;
         macroCount++;
       }
     }
-
     const macroVariance = macroSum / Math.max(macroCount, 1);
     const ratio = microVariance / Math.max(macroVariance, 1);
     const isHalftone = microVariance > 150 && macroVariance < 600 && ratio > 0.35;
 
-    return {
-      isHalftone,
-      confidence: isHalftone ? 0.9 : 0.1,
-      microVariance,
-      macroVariance
-    };
+    return { isHalftone, confidence: isHalftone ? 0.9 : 0.1, microVariance, macroVariance };
   } catch {
     return { isHalftone: false, confidence: 0 };
   }
 }
 
 async function detectLineArt(buffer, analysis) {
-  if (!analysis.isGrayscale) {
-    return { isLineArt: false, confidence: 0 };
-  }
-
+  if (!analysis.isGrayscale) return { isLineArt: false, confidence: 0 };
   try {
     const { data } = await sharp(buffer)
       .resize(256, 256, { fit: 'inside' })
@@ -725,21 +692,14 @@ async function detectLineArt(buffer, analysis) {
       .toBuffer({ resolveWithObject: true });
 
     const hist = new Array(256).fill(0);
-
-    for (let i = 0; i < data.length; i++) {
-      hist[data[i]]++;
-    }
+    for (let i = 0; i < data.length; i++) hist[data[i]]++;
 
     const total = data.length;
-
-    let darkPeak = 0;
-    let lightPeak = 0;
-
+    let darkPeak = 0, lightPeak = 0;
     for (let i = 0; i <= 80; i++) darkPeak = Math.max(darkPeak, hist[i]);
     for (let i = 175; i <= 255; i++) lightPeak = Math.max(lightPeak, hist[i]);
 
     let middleSum = 0;
-
     for (let i = 100; i <= 155; i++) middleSum += hist[i];
 
     const darkRatio = darkPeak / total;
@@ -748,17 +708,14 @@ async function detectLineArt(buffer, analysis) {
 
     const isBimodal = darkRatio > 0.05 && lightRatio > 0.15 && middleRatio < 0.15;
     const isSharp = analysis.sharpness > 30;
-
     const isLineArt = isBimodal && isSharp;
-    const confidence = isLineArt ? 0.93 : 0.1;
 
-    return { isLineArt, confidence, darkRatio, lightRatio, middleRatio };
+    return { isLineArt, confidence: isLineArt ? 0.93 : 0.1, darkRatio, lightRatio, middleRatio };
   } catch {
     return { isLineArt: false, confidence: 0 };
   }
 }
 
-// Approved Item 2: Accurate large-image analysis buffer capping
 async function detectImageType(buffer, metadata) {
   const width = metadata.width || 0;
   const height = metadata.height || 0;
@@ -771,16 +728,13 @@ async function detectImageType(buffer, metadata) {
       ANALYSIS_MAX_DIM / Math.max(width, 1),
       ANALYSIS_MAX_DIM / Math.max(height, 1)
     );
-
     analysisWidth = Math.max(1, Math.round(width * scale));
     analysisHeight = Math.max(1, Math.round(height * scale));
   }
 
   const analysisPixels = analysisWidth * analysisHeight;
-
   if (analysisPixels > ANALYSIS_MAX_PIXELS) {
     const scale = Math.sqrt(ANALYSIS_MAX_PIXELS / analysisPixels);
-
     analysisWidth = Math.max(1, Math.round(analysisWidth * scale));
     analysisHeight = Math.max(1, Math.round(analysisHeight * scale));
   }
@@ -796,12 +750,8 @@ async function detectImageType(buffer, metadata) {
   const stats = await sharp(statsSource).stats();
   const { channels } = stats;
 
-  let totalEntropy = 0;
-  let totalSharpness = 0;
-  let colorVariance = 0;
-  let meanLuminance = 128;
-  let stdevLuminance = 50;
-  let maxLuminance = 255;
+  let totalEntropy = 0, totalSharpness = 0, colorVariance = 0;
+  let meanLuminance = 128, stdevLuminance = 50, maxLuminance = 255;
 
   if (channels && channels.length > 0) {
     meanLuminance = channels[0].mean || 128;
@@ -812,7 +762,6 @@ async function detectImageType(buffer, metadata) {
       totalEntropy += ch.entropy || 0;
       totalSharpness += ch.sharpness || 0;
     }
-
     totalEntropy /= channels.length;
     totalSharpness /= channels.length;
 
@@ -820,11 +769,7 @@ async function detectImageType(buffer, metadata) {
       const rMean = channels[0].mean || 0;
       const gMean = channels[1].mean || 0;
       const bMean = channels[2].mean || 0;
-
-      colorVariance =
-        Math.abs(rMean - gMean) +
-        Math.abs(gMean - bMean) +
-        Math.abs(rMean - bMean);
+      colorVariance = Math.abs(rMean - gMean) + Math.abs(gMean - bMean) + Math.abs(rMean - bMean);
     }
   }
 
@@ -832,38 +777,24 @@ async function detectImageType(buffer, metadata) {
   const isHighContrast = totalEntropy > 6.5;
   const isColorful = colorVariance > 80;
   const aspectRatio = (metadata.height || 0) / Math.max(metadata.width || 1, 1);
-
   const isMangaStrip = aspectRatio > 2.5;
   const isMangaPage = aspectRatio > 1.2 && aspectRatio < 2.0 && isGrayscale;
   const isAnime = isColorful && totalSharpness > 100;
 
   return {
-    isGrayscale,
-    isHighContrast,
-    isColorful,
-    isMangaStrip,
-    isMangaPage,
-    isAnime,
-    entropy: totalEntropy,
-    sharpness: totalSharpness,
-    colorVariance,
-    aspectRatio,
-    meanLuminance,
-    stdevLuminance,
-    maxLuminance
+    isGrayscale, isHighContrast, isColorful,
+    isMangaStrip, isMangaPage, isAnime,
+    entropy: totalEntropy, sharpness: totalSharpness,
+    colorVariance, aspectRatio,
+    meanLuminance, stdevLuminance, maxLuminance
   };
 }
 
 function getViewportMaxDim(req) {
   const viewportWidth = parseInt(req.headers['sec-ch-viewport-width']) ||
-    parseInt(req.headers['viewport-width']) ||
-    VIEWPORT_FALLBACK;
-
-  const dpr = parseFloat(req.headers['sec-ch-dpr']) ||
-    parseFloat(req.headers['dpr']) || 1;
-
+    parseInt(req.headers['viewport-width']) || VIEWPORT_FALLBACK;
+  const dpr = parseFloat(req.headers['sec-ch-dpr']) || parseFloat(req.headers['dpr']) || 1;
   const effectiveWidth = Math.round(viewportWidth * dpr);
-
   return Math.max(320, Math.min(effectiveWidth, MAX_OUTPUT_DIM));
 }
 
@@ -871,10 +802,6 @@ function getChromaSubsampling(analysis) {
   if (analysis.isColorful && analysis.sharpness > 80) return '4:4:4';
   return '4:2:0';
 }
-
-// ============================================================
-// FORCED FORMAT SELECTOR
-// ============================================================
 
 function chooseOutputFormat(metadata, totalPixelCost) {
   const isAnimated = (metadata.pages || 1) > 1;
@@ -891,25 +818,20 @@ function chooseOutputFormat(metadata, totalPixelCost) {
     return { format: 'jpeg', reason: 'unknown_dimensions' };
   }
 
-  // WebP has a hard spec limit of 16383x16383. 
-  // If a strip is taller than that, WebP will crash. Force JPEG.
   if (height > 16383 || width > 16383) {
     return { format: 'jpeg', reason: 'exceeds_webp_and_safe_limits' };
   }
 
-  // Trust the pixel cost. The Memory Governor already admitted it.
   if (totalPixelCost <= AVIF_MAX_PIXELS) {
     return { format: 'avif', reason: 'avif_allowed' };
   }
 
-  // Over pixel cap: resize down to fit, still use AVIF
   return { format: 'avif', reason: 'avif_resized_to_fit' };
-} 
+}
 
 // ============================================================
 // MAIN COMPRESS FUNCTION
 // ============================================================
-
 export default async function compress(req, res, buffer, governor) {
   const memGov = governor || memoryGovernor;
   const reqId = req.id || 'unknown';
@@ -930,20 +852,10 @@ export default async function compress(req, res, buffer, governor) {
 
   const abortController = new AbortController();
   const { signal } = abortController;
-
   let clientDisconnected = false;
-
   const startedAt = Date.now();
 
   const timeoutHandle = setTimeout(() => {
-    console.warn(JSON.stringify({
-      event: 'COMPRESS_ABORT',
-      reqId,
-      reason: 'SHARP_HARD_TIMEOUT',
-      elapsedMs: Date.now() - startedAt,
-      limitMs: SHARP_HARD_TIMEOUT_MS
-    }));
-
     clientDisconnected = true;
     abortController.abort(new Error('SHARP_HARD_TIMEOUT'));
   }, SHARP_HARD_TIMEOUT_MS);
@@ -951,27 +863,12 @@ export default async function compress(req, res, buffer, governor) {
   if (ENABLE_TIMEOUT_GUILLOTINE) {
     req.on('close', () => {
       if (!res.writableEnded) {
-        console.warn(JSON.stringify({
-          event: 'COMPRESS_ABORT',
-          reqId,
-          reason: 'CLIENT_DISCONNECT',
-          elapsedMs: Date.now() - startedAt
-        }));
-
         clientDisconnected = true;
         abortController.abort(new Error('CLIENT_DISCONNECT'));
       }
     });
-
     res.on('close', () => {
       if (!res.writableEnded) {
-        console.warn(JSON.stringify({
-          event: 'COMPRESS_ABORT',
-          reqId,
-          reason: 'RESPONSE_CLOSED',
-          elapsedMs: Date.now() - startedAt
-        }));
-
         clientDisconnected = true;
         abortController.abort(new Error('RESPONSE_CLOSED'));
       }
@@ -990,27 +887,22 @@ export default async function compress(req, res, buffer, governor) {
     const metadata = await sharp(buffer).metadata();
     const format = metadata.format;
 
-    if (!format || format === 'raw') {
-      return buffer;
-    }
+    if (!format || format === 'raw') return buffer;
 
-    // F12-MODIFIED: raw/bypass removed
     const mode = req.opts?.mode || 'auto';
     const isPhotoMode = mode === 'photo' || mode === 'normal';
     const isMangaMode = mode === 'manga' || mode === 'comic';
     const isStripMode = ['strip', 'webtoon', 'manhwa', 'manhua'].includes(mode);
-
     const sharpenPreference = parseTriState(req.query?.sharpen, req.opts?.sharpen);
 
-    const allowEnhancements = true;
-    const allowLineArtFilters = allowEnhancements && !isPhotoMode;
-    const allowPhotoFilters = allowEnhancements && !isMangaMode && !isStripMode;
+    let allowEnhancements = true;
+    let allowLineArtFilters = allowEnhancements && !isPhotoMode;
+    let allowPhotoFilters = allowEnhancements && !isMangaMode && !isStripMode;
 
     // Dimension overlord
     if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
       const MAX_ASPECT_RATIO = 200;
-
       const width = metadata.width || 0;
       const height = metadata.height || 0;
 
@@ -1022,9 +914,7 @@ export default async function compress(req, res, buffer, governor) {
 
       const minDim = Math.max(1, Math.min(width, height));
       const maxDim = Math.max(width, height);
-      const aspectRatio = maxDim / minDim;
-
-      if (aspectRatio > MAX_ASPECT_RATIO) {
+      if (maxDim / minDim > MAX_ASPECT_RATIO) {
         res.status(413);
         res.setHeader('X-Dimension-Overlord', 'REJECTED_ASPECT');
         return Buffer.alloc(0);
@@ -1037,90 +927,61 @@ export default async function compress(req, res, buffer, governor) {
       return Buffer.alloc(0);
     }
 
-    // Calculate pixel cost for memory governor
     const frames = metadata.pages || 1;
     const width = metadata.width || 0;
     const height = metadata.height || 0;
     totalPixelCost = width * height * frames;
 
-    // FORCED FORMAT SELECTION
     const formatDecision = chooseOutputFormat(metadata, totalPixelCost);
     const outputFormat = formatDecision.format;
 
     let logUrl = 'unknown';
     try {
       const u = new URL(req.opts?.url);
-      logUrl = u.origin + u.pathname;
+      logUrl = u.origin + '/*';
     } catch {}
 
     res.setHeader('X-Format-Reason', formatDecision.reason);
 
-    console.log(JSON.stringify({
-      event: 'FORMAT_DECISION',
-      reqId,
-      url: logUrl,
-      format: outputFormat,
-      reason: formatDecision.reason,
-      width,
-      height,
-      frames,
-      totalPixelCost,
-      avifMaxPixels: AVIF_MAX_PIXELS,
-      avifMaxDimension: AVIF_MAX_DIMENSION
-    }));
     const paramFingerprint = [
-      outputFormat,
-      req.opts?.quality,
-      req.opts?.grayscale,
-      req.opts?.maxDim,
-      req.opts?.maxStripWidth,
-      mode,
+      outputFormat, req.opts?.quality, req.opts?.grayscale,
+      req.opts?.maxDim, req.opts?.maxStripWidth, mode,
       sharpenPreference === undefined ? '' : String(sharpenPreference),
       req.opts?.rotate || 0
     ].join('|');
 
-    // Exact cache lookup
     const exactHash = await generateExactHash(buffer);
     const exactKey = exactHash ? `${exactHash}:${paramFingerprint}` : null;
 
     if (exactKey) {
       const exactHit = exactCache.get(exactKey);
-
       if (exactHit) {
         res.setHeader('X-Exact-Cache', 'HIT');
         res.setHeader('Content-Type', exactHit.contentType);
-
         if (exactHit.placeholder) res.setHeader('X-Placeholder', exactHit.placeholder);
         if (exactHit.grade) res.setHeader('X-Quality-Grade', exactHit.grade);
         if (exactHit.palette && exactHit.palette.length > 0) {
           res.setHeader('X-Palette', exactHit.palette.join(','));
         }
-
         if (ENABLE_ORACLE_LEDGER) {
           metrics.cacheHits++;
           metrics.totalBytesOut += exactHit.buffer.length;
           metrics.totalBytesSaved += buffer.length - exactHit.buffer.length;
         }
-
         return exactHit.buffer;
       }
     }
 
-    // Void watcher / placeholder / palette
     let thumbResult = null;
-
     if ((ENABLE_VOID_WATCHER || ENABLE_PALETTE || ENABLE_PLACEHOLDER) && allowEnhancements) {
       thumbResult = await generatePlaceholderAndPalette(buffer);
-
       if (ENABLE_VOID_WATCHER && thumbResult.isVoid) {
         res.setHeader('X-Void', 'TRUE');
         res.setHeader('Content-Type', `image/${format}`);
-
         if (ENABLE_ORACLE_LEDGER) {
           metrics.voidDetections++;
           metrics.totalBytesOut += buffer.length;
         }
-
         return buffer;
       }
     }
@@ -1131,27 +992,38 @@ export default async function compress(req, res, buffer, governor) {
       return Buffer.alloc(0);
     }
 
-    if (ENABLE_ORACLE_LEDGER) {
-      metrics.cacheMisses++;
-    }
+    if (ENABLE_ORACLE_LEDGER) metrics.cacheMisses++;
 
-    // Memory governor pixel admission
     if (!memGov.admitPixels(totalPixelCost)) {
       res.status(503);
       res.setHeader('X-Memory-Governor', 'REJECTED');
-      res.setHeader('X-RSS-MB', String(memGov.getRssMB()));
-      res.setHeader('X-Pixel-Budget', String(memGov.getPixelBudget()));
       res.setHeader('Retry-After', '5');
-
-      if (ENABLE_ORACLE_LEDGER) {
-        metrics.memoryRejections++;
-      }
-
+      if (ENABLE_ORACLE_LEDGER) metrics.memoryRejections++;
       return Buffer.alloc(0);
     }
 
     res.setHeader('X-Memory-Governor', 'ADMITTED');
     res.setHeader('X-Pixel-Cost', String(totalPixelCost));
+
+    // FEATURE: CPU/event-loop pressure governor
+    const eventLoopLag = await measureEventLoopLag();
+    const cpuPressure = eventLoopLag > CPU_LAG_THRESHOLD_MS;
+
+    res.setHeader('X-CPU-Lag', `${eventLoopLag.toFixed(2)}ms`);
+    res.setHeader('X-CPU-Pressure', cpuPressure ? 'TRUE' : 'FALSE');
+
+    if (cpuPressure) {
+      allowEnhancements = false;
+      allowLineArtFilters = false;
+      allowPhotoFilters = false;
+      if (ENABLE_ORACLE_LEDGER) metrics.cpuPressureEvents++;
+    }
+
+    if (signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      res.status(499);
+      return Buffer.alloc(0);
+    }
 
     try {
       const analysis = await detectImageType(buffer, metadata);
@@ -1164,12 +1036,39 @@ export default async function compress(req, res, buffer, governor) {
         res.setHeader('X-Palette', palette.join(','));
       }
 
+      // FEATURE: Text/OCR Region Preservation detection
+      const isTextHeavy = ENABLE_TEXT_PRESERVATION && isTextHeavyImage(analysis);
+      if (isTextHeavy) {
+        res.setHeader('X-Text-Preservation', 'ACTIVE');
+        if (ENABLE_ORACLE_LEDGER) metrics.textPreservations++;
+      }
+
+      // FEATURE: HDR/wide-gamut detection
+      const hdrInfo = detectHDRCharacteristics(metadata);
+      const needsHDRConversion = ENABLE_HDR_SAFE_CONVERSION &&
+        (hdrInfo.isWideGamut || hdrInfo.isPotentialHDR);
+
+      if (needsHDRConversion) {
+        res.setHeader('X-HDR-Conversion', 'ACTIVE');
+        res.setHeader('X-HDR-Space', hdrInfo.space);
+        if (ENABLE_ORACLE_LEDGER) metrics.hdrConversions++;
+      }
+
+      // FEATURE: Smart Alpha Channel Trimming detection
+      let alphaBounds = null;
+      if (ENABLE_ALPHA_TRIM && metadata.hasAlpha && !cpuPressure) {
+        alphaBounds = await detectAlphaBounds(buffer, metadata);
+        if (alphaBounds) {
+          res.setHeader('X-Alpha-Trim', 'ACTIVE');
+          res.setHeader('X-Alpha-Trim-Pad', `${alphaBounds.padLeft},${alphaBounds.padTop},${alphaBounds.padRight},${alphaBounds.padBottom}`);
+          if (ENABLE_ORACLE_LEDGER) metrics.alphaTrims++;
+        }
+      }
+
       // Deskew
       let skewAngle = 0;
-
       if (ENABLE_DESKEW && allowEnhancements && !isStripMode && !analysis.isMangaStrip) {
         skewAngle = await detectSkew(buffer);
-
         if (skewAngle !== 0) {
           res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
           recordMetric('deskew');
@@ -1184,21 +1083,18 @@ export default async function compress(req, res, buffer, governor) {
 
       // Judge quality
       let judgeResult = null;
-
       if (ENABLE_JUDGE && allowEnhancements) {
         judgeResult = judgeQuality(analysis, metadata);
       }
 
       // Halftone / moire detection
       let halftoneResult = null;
-
       if (ENABLE_MOIRE && allowEnhancements && !isStripMode) {
         halftoneResult = await detectHalftone(buffer, metadata, analysis);
       }
 
       // Line art detection
       let lineArtResult = null;
-
       if (ENABLE_LINE_DENOISE && allowLineArtFilters) {
         lineArtResult = await detectLineArt(buffer, analysis);
       }
@@ -1209,7 +1105,6 @@ export default async function compress(req, res, buffer, governor) {
 
       if (ENABLE_ALPHA_SENTINEL && metadata.hasAlpha && !isAnimated) {
         alphaStrippable = await detectAlphaStrippable(buffer, metadata);
-
         if (alphaStrippable) {
           res.setHeader('X-Alpha-Sentinel', 'STRIPPED');
           recordMetric('alphaSentinel');
@@ -1222,9 +1117,15 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
-      // CHRONOS v2: pixel/format aware effort
+      // CHRONOS v2
       const chronos = getChronosState(totalPixelCost, outputFormat);
-      const effort = chronos.effort;
+      let effort = chronos.effort;
+
+      // FEATURE: CPU pressure reduces effort
+      if (cpuPressure) {
+        effort = Math.max(2, effort - 2);
+        res.setHeader('X-CPU-Effort-Reduced', 'TRUE');
+      }
 
       res.setHeader('X-Chronos-State', chronos.state);
       res.setHeader('X-Chronos-Effort', String(effort));
@@ -1236,32 +1137,36 @@ export default async function compress(req, res, buffer, governor) {
         quality = Math.max(10, Math.min(95, quality + judgeResult.qualityAdjust));
       }
 
-      // Frame cap for animated images
+      // FEATURE: Text/OCR quality boost
+      if (isTextHeavy) {
+        quality = Math.min(95, quality + TEXT_QUALITY_BOOST);
+        res.setHeader('X-Text-Quality-Boost', `+${TEXT_QUALITY_BOOST}`);
+      }
+
+      // FEATURE: Animated Frame Dropping
       const frameCount = metadata.pages || 1;
+      let effectiveFrameCount = frameCount;
+      let frameDropActive = false;
 
       if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
         res.setHeader('X-Frame-Cap', 'TRUNCATED');
-
-        if (ENABLE_ORACLE_LEDGER) {
-          metrics.totalBytesOut += buffer.length;
-        }
-
+        if (ENABLE_ORACLE_LEDGER) metrics.totalBytesOut += buffer.length;
         return buffer;
+      }
+
+      if (ENABLE_FRAME_DROPPING && isAnimated && frameCount > FRAME_DROP_THRESHOLD) {
+        frameDropActive = true;
+        effectiveFrameCount = Math.ceil(frameCount / 2);
+        res.setHeader('X-Frame-Drop', `${frameCount}->${effectiveFrameCount}`);
+        // Reduce quality further for dropped-frame animations to compensate
+        quality = Math.max(10, quality - 10);
+        if (ENABLE_ORACLE_LEDGER) metrics.frameDrops++;
       }
 
       // Banding exorcist check
       let bandingExorcistActive = false;
-
-      if (
-        ENABLE_BANDING_EXORCIST &&
-        allowPhotoFilters &&
-        !isAnimated
-      ) {
-        if (
-          analysis.stdevLuminance > 20 &&
-          analysis.stdevLuminance < 50 &&
-          analysis.sharpness < 30
-        ) {
+      if (ENABLE_BANDING_EXORCIST && allowPhotoFilters && !isAnimated) {
+        if (analysis.stdevLuminance > 20 && analysis.stdevLuminance < 50 && analysis.sharpness < 30) {
           bandingExorcistActive = true;
           recordMetric('bandingExorcist');
         }
@@ -1275,22 +1180,37 @@ export default async function compress(req, res, buffer, governor) {
 
       // Build Sharp pipeline
       let pipeline = sharp(buffer, {
-        animated: isAnimated,
+        animated: isAnimated && !frameDropActive,
         limitInputPixels: 0
       });
 
-      if (ENABLE_METADATA_REAPER) {
+      // FEATURE: Safe Metadata Exceptions
+      if (ENABLE_SAFE_METADATA && ENABLE_METADATA_REAPER) {
+        // Keep orientation but strip GPS/sensitive EXIF
+        // Sharp's rotate() normalizes orientation from EXIF
+        pipeline = pipeline.rotate();
+        // Do NOT pass withMetadata() to avoid leaking GPS/device data
+        recordMetric('metadataReaper');
+      } else if (ENABLE_METADATA_REAPER) {
         pipeline = pipeline.rotate();
         recordMetric('metadataReaper');
       } else {
-        pipeline = pipeline.withMetadata({
-          orientation: metadata.orientation || 1,
-        });
+        pipeline = pipeline.withMetadata({ orientation: metadata.orientation || 1 });
       }
 
       pipeline = pipeline.toColourspace('srgb');
 
-      // F13-MODIFIED: Apply safe manual rotation
+      // FEATURE: HDR/wide-gamut safe downconversion
+      if (needsHDRConversion) {
+        if (hdrInfo.isPotentialHDR) {
+          // Approximate HDR to SDR tone mapping via gamma
+          pipeline = pipeline.gamma(1.0 / 2.2);
+          res.setHeader('X-HDR-ToneMap', 'GAMMA_2.2');
+        }
+        // Wide gamut is handled by toColourspace('srgb') above
+        res.setHeader('X-HDR-Source-Space', hdrInfo.space);
+      }
+
       if (req.opts?.rotate) {
         pipeline = pipeline.rotate(req.opts.rotate);
       }
@@ -1299,11 +1219,8 @@ export default async function compress(req, res, buffer, governor) {
       const userExplicitlyWantsColor = req.opts?.grayscale === false;
       const userExplicitlyWantsBW = req.opts?.grayscale === true;
 
-      if (
-        FORCE_GRAYSCALE ||
-        userExplicitlyWantsBW ||
-        (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)
-      ) {
+      if (FORCE_GRAYSCALE || userExplicitlyWantsBW ||
+          (!userExplicitlyWantsColor && analysis.isGrayscale && !analysis.isColorful)) {
         pipeline = pipeline.grayscale();
       }
 
@@ -1325,7 +1242,7 @@ export default async function compress(req, res, buffer, governor) {
         if (analysis.meanLuminance > 150 && analysis.maxLuminance > 200 && analysis.maxLuminance < 253) {
           const stretch = 255 / analysis.maxLuminance;
           pipeline = pipeline.linear(stretch, 0);
-          res.setHeader('X-Ghost-Stripper', `STRETCHED (max:${analysis.maxLuminance} -> 255)`);
+          res.setHeader('X-Ghost-Stripper', `STRETCHED`);
           recordMetric('ghostStripper');
         }
       }
@@ -1339,35 +1256,29 @@ export default async function compress(req, res, buffer, governor) {
         });
       }
 
+      // FEATURE: Smart Alpha Channel Trimming - apply extract
+      if (alphaBounds) {
+        pipeline = pipeline.extract({
+          left: alphaBounds.left,
+          top: alphaBounds.top,
+          width: alphaBounds.width,
+          height: alphaBounds.height
+        });
+      }
+
       // Moire removal
-      if (
-        allowEnhancements &&
-        halftoneResult &&
-        halftoneResult.isHalftone &&
-        halftoneResult.confidence > 0.85
-      ) {
+      if (allowEnhancements && halftoneResult && halftoneResult.isHalftone && halftoneResult.confidence > 0.85) {
         pipeline = pipeline.median(3);
         res.setHeader('X-Moire-Removed', 'true');
         recordMetric('moireRemoval');
       }
 
       // Line denoise
-      if (
-        allowLineArtFilters &&
-        lineArtResult &&
-        lineArtResult.isLineArt &&
-        lineArtResult.confidence > 0.85
-      ) {
+      if (allowLineArtFilters && lineArtResult && lineArtResult.isLineArt && lineArtResult.confidence > 0.85) {
         pipeline = pipeline.median(3);
-
         if (sharpenPreference !== false) {
-          pipeline = pipeline.sharpen({
-            sigma: 0.6,
-            flat: 3.0,
-            jagged: 1.5,
-          });
+          pipeline = pipeline.sharpen({ sigma: 0.6, flat: 3.0, jagged: 1.5 });
         }
-
         res.setHeader('X-Line-Denoise', 'true');
         recordMetric('lineDenoise');
       }
@@ -1376,7 +1287,8 @@ export default async function compress(req, res, buffer, governor) {
       let targetWidth = null;
       let targetHeight = null;
 
-      const { width: origW, height: origH } = metadata;
+      const origW = alphaBounds ? alphaBounds.width : width;
+      const origH = alphaBounds ? alphaBounds.height : height;
 
       const effectiveStripWidth = (req.opts?.maxStripWidth > 0) ? req.opts.maxStripWidth : MAX_STRIP_WIDTH;
       const effectiveMaxDim = (req.opts?.maxDim > 0) ? req.opts.maxDim : viewportMaxDim;
@@ -1395,37 +1307,22 @@ export default async function compress(req, res, buffer, governor) {
 
       // Layout prophet headers
       if (ENABLE_LAYOUT_PROPHET) {
-        let outW = origW;
-        let outH = origH;
-
-        if (targetWidth && targetHeight) {
-          outW = targetWidth;
-          outH = targetHeight;
-        } else if (targetWidth) {
-          outW = targetWidth;
-          outH = Math.round(origH * (targetWidth / origW));
-        } else if (targetHeight) {
-          outH = targetHeight;
-          outW = Math.round(origW * (targetHeight / origH));
-        }
-
-        const aspectRatio = (outW / outH).toFixed(4);
-        const orientation = outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square';
+        let outW = origW, outH = origH;
+        if (targetWidth && targetHeight) { outW = targetWidth; outH = targetHeight; }
+        else if (targetWidth) { outW = targetWidth; outH = Math.round(origH * (targetWidth / origW)); }
+        else if (targetHeight) { outH = targetHeight; outW = Math.round(origW * (targetHeight / origH)); }
 
         res.setHeader('X-Output-Width', String(outW));
         res.setHeader('X-Output-Height', String(outH));
-        res.setHeader('X-Aspect-Ratio', aspectRatio);
-        res.setHeader('X-Orientation', orientation);
+        res.setHeader('X-Aspect-Ratio', (outW / outH).toFixed(4));
+        res.setHeader('X-Orientation', outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square');
       }
 
-      // If pixel cost exceeds AVIF cap, force resize to fit
       if (outputFormat === 'avif' && totalPixelCost > AVIF_MAX_PIXELS) {
         const scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
         targetWidth = Math.round(origW * scaleFactor);
         targetHeight = Math.round(origH * scaleFactor);
-
         res.setHeader('X-AVIF-Resize-To-Fit', 'true');
-        res.setHeader('X-AVIF-Resize-Scale', scaleFactor.toFixed(4));
       }
 
       if (targetWidth || targetHeight) {
@@ -1436,28 +1333,30 @@ export default async function compress(req, res, buffer, governor) {
         });
       }
 
-      // Sharpen
+      // Sharpen - boosted for text images
       const contentWantsSharpen =
         sharpenPreference !== false &&
-        analysis.sharpness < 50 &&
+        (analysis.sharpness < 50 || isTextHeavy) &&
         !analysis.isMangaStrip;
 
-      if (
-        allowEnhancements &&
-        (sharpenPreference === true || contentWantsSharpen)
-      ) {
-        const alreadySharpened =
-          allowLineArtFilters &&
-          lineArtResult &&
-          lineArtResult.isLineArt &&
-          lineArtResult.confidence > 0.85;
+      if (allowEnhancements && (sharpenPreference === true || contentWantsSharpen)) {
+        const alreadySharpened = allowLineArtFilters && lineArtResult &&
+          lineArtResult.isLineArt && lineArtResult.confidence > 0.85;
 
         if (!alreadySharpened) {
+          const sharpenSigma = isTextHeavy ? 1.0 : 0.8;
+          const sharpenFlat = isTextHeavy ? 3.0 : 2.0;
+          const sharpenJagged = isTextHeavy ? 2.0 : 1.0;
+
           pipeline = pipeline.sharpen({
-            sigma: 0.8,
-            flat: 2.0,
-            jagged: 1.0,
+            sigma: sharpenSigma,
+            flat: sharpenFlat,
+            jagged: sharpenJagged,
           });
+
+          if (isTextHeavy) {
+            res.setHeader('X-Text-Sharpen', 'BOOSTED');
+          }
         }
       }
 
@@ -1471,13 +1370,7 @@ export default async function compress(req, res, buffer, governor) {
       // Banding exorcist
       if (bandingExorcistActive) {
         const noiseTile = await getNoiseTile();
-
-        pipeline = pipeline.composite([{
-          input: noiseTile,
-          tile: true,
-          blend: 'over',
-        }]);
-
+        pipeline = pipeline.composite([{ input: noiseTile, tile: true, blend: 'over' }]);
         res.setHeader('X-Banding-Exorcist', 'ACTIVE');
       }
 
@@ -1487,18 +1380,14 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
-      // ENCODE — forced format: avif / webp / jpeg only
+      // ENCODE
       let outputBuffer;
       let contentType;
-
       const encodeStart = Date.now();
       activeEncodes++;
 
       if (ENABLE_TIMEOUT_GUILLOTINE) {
-        const onAbort = () => {
-          pipeline.destroy();
-        };
-
+        const onAbort = () => { pipeline.destroy(); };
         signal.addEventListener('abort', onAbort, { once: true });
 
         try {
@@ -1511,21 +1400,19 @@ export default async function compress(req, res, buffer, governor) {
               }).toBuffer();
               contentType = 'image/avif';
               break;
-
             case 'webp':
               outputBuffer = await pipeline.webp({
-                quality: quality,
+                quality,
                 effort: Math.min(Math.max(effort, 0), 6),
                 smartSubsample: true,
                 preset: getWebpPreset(analysis, lineArtResult, origW, origH),
               }).toBuffer();
               contentType = 'image/webp';
               break;
-
             case 'jpeg':
             default:
               outputBuffer = await pipeline.jpeg({
-                quality: quality,
+                quality,
                 progressive: true,
                 mozjpeg: true,
                 chromaSubsampling: getChromaSubsampling(analysis),
@@ -1549,21 +1436,19 @@ export default async function compress(req, res, buffer, governor) {
             }).toBuffer();
             contentType = 'image/avif';
             break;
-
           case 'webp':
             outputBuffer = await pipeline.webp({
-              quality: quality,
+              quality,
               effort: Math.min(Math.max(effort, 0), 6),
               smartSubsample: true,
               preset: getWebpPreset(analysis, lineArtResult, origW, origH),
             }).toBuffer();
             contentType = 'image/webp';
             break;
-
           case 'jpeg':
           default:
             outputBuffer = await pipeline.jpeg({
-              quality: quality,
+              quality,
               progressive: true,
               mozjpeg: true,
               chromaSubsampling: getChromaSubsampling(analysis),
@@ -1577,13 +1462,10 @@ export default async function compress(req, res, buffer, governor) {
       }
 
       activeEncodes--;
-
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
-      // Chronos: record encode time for adaptive effort
       recordEncodeTime(encodeTime, totalPixelCost, outputFormat);
-
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
       res.setHeader('X-Encode-Effort', String(effort));
 
@@ -1604,14 +1486,9 @@ export default async function compress(req, res, buffer, governor) {
         if (!verifyOutput(outputBuffer, outputFormat)) {
           res.setHeader('X-Encoding-Verifier', 'FAILED');
           res.status(404);
-
-          if (ENABLE_ORACLE_LEDGER) {
-            metrics.encodingFailures++;
-          }
-
+          if (ENABLE_ORACLE_LEDGER) metrics.encodingFailures++;
           return Buffer.alloc(0);
         }
-
         res.setHeader('X-Encoding-Verifier', 'PASSED');
       }
 
@@ -1619,15 +1496,10 @@ export default async function compress(req, res, buffer, governor) {
       if (outputBuffer.length >= buffer.length) {
         res.setHeader('X-Compression', 'SKIPPED');
         res.setHeader('Content-Type', `image/${format}`);
-
         if (placeholder) res.setHeader('X-Placeholder', placeholder);
         if (judgeResult) res.setHeader('X-Quality-Grade', judgeResult.grade);
         if (palette.length > 0) res.setHeader('X-Palette', palette.join(','));
-
-        if (ENABLE_ORACLE_LEDGER) {
-          metrics.totalBytesOut += buffer.length;
-        }
-
+        if (ENABLE_ORACLE_LEDGER) metrics.totalBytesOut += buffer.length;
         return buffer;
       }
 
@@ -1642,12 +1514,11 @@ export default async function compress(req, res, buffer, governor) {
       // Cache set
       const cacheEntry = {
         buffer: outputBuffer,
-        contentType: contentType,
-        placeholder: placeholder,
+        contentType,
+        placeholder,
         grade: judgeResult ? judgeResult.grade : null,
-        palette: palette,
+        palette,
       };
-
       if (exactKey) exactCache.set(exactKey, cacheEntry);
 
       res.setHeader('X-Perceptual-Cache', 'REMOVED');
@@ -1656,10 +1527,7 @@ export default async function compress(req, res, buffer, governor) {
       res.setHeader('Content-Type', contentType);
       res.setHeader('X-Compression-Ratio', ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%');
 
-      if (placeholder) {
-        res.setHeader('X-Placeholder', placeholder);
-      }
-
+      if (placeholder) res.setHeader('X-Placeholder', placeholder);
       if (judgeResult) {
         res.setHeader('X-Quality-Grade', judgeResult.grade);
         res.setHeader('X-Quality-Score', String(judgeResult.score));
@@ -1670,48 +1538,10 @@ export default async function compress(req, res, buffer, governor) {
         analysis.isAnime ? 'anime' :
         analysis.isGrayscale ? 'grayscale' : 'photo');
 
-     // Vercel log: image analysis summary
-      console.log(JSON.stringify({
-        event: 'COMPRESS',
-        reqId: reqId,
-        activeRequests: activeRequests,
-        activeEncodes: activeEncodes,
-        url: (() => {
-          try {
-            const u = new URL(req.opts?.url);
-            return u.origin + u.pathname;
-          } catch {
-            return 'unknown';
-          }
-        })(),
-        format: outputFormat,
-        quality: quality,
-        effort: effort,
-        chronosState: chronos.state,
-        grade: judgeResult ? judgeResult.grade : null,
-        score: judgeResult ? judgeResult.score : null,
-        inputBytes: buffer.length,
-        outputBytes: outputBuffer.length,
-        savedBytes: buffer.length - outputBuffer.length,
-        compressionRatio: ((1 - outputBuffer.length / buffer.length) * 100).toFixed(1) + '%',
-        encodeTimeMs: encodeTime,
-        inputDims: `${origW}x${origH}`,
-        outputDims: `${targetWidth || origW}x${targetHeight || origH}`,
-        pixelCost: totalPixelCost,
-        imageType: analysis.isMangaStrip ? 'manga-strip' :
-          analysis.isMangaPage ? 'manga-page' :
-          analysis.isAnime ? 'anime' :
-          analysis.isGrayscale ? 'grayscale' : 'photo',
-        frames: frames,
-        mode: mode
-      }));
-
       res.setHeader('Content-Length', outputBuffer.length);
-
       return outputBuffer;
-    
+
     } finally {
-      // Release pixel budget
       if (totalPixelCost > 0) {
         memGov.releasePixels(totalPixelCost);
       }
@@ -1722,10 +1552,8 @@ export default async function compress(req, res, buffer, governor) {
       return Buffer.alloc(0);
     }
 
-    // F20: Request ID in error logs
     const safeMessage = err?.message ? String(err.message).split('?')[0] : 'Unknown compress error';
     console.error(`[COMPRESS ERROR] [${reqId}]`, safeMessage);
-
     res.setHeader('X-Compression', 'FAILED');
 
     if (ENABLE_ORACLE_LEDGER) {
@@ -1739,10 +1567,9 @@ export default async function compress(req, res, buffer, governor) {
     } else {
       req.socket?.destroy();
     }
-
     return null;
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     activeRequests--;
   }
-    }
+  }
