@@ -24,6 +24,17 @@ const BLOCKED_SUFFIXES = [
   '.exit'
 ];
 
+const BLOCKED_IPV4_RANGES = new Set([
+  'unspecified',
+  'private',
+  'loopback',
+  'linkLocal',
+  'broadcast',
+  'multicast',
+  'reserved',
+  'carrierGradeNat'
+]);
+
 const DNS_CACHE = new LRUCache({
   max: 1000,
   ttl: 60000
@@ -101,10 +112,15 @@ export function isPublicIP(ip) {
 
     if (addr.kind() === 'ipv4') {
       const range = addr.range();
-      if (range !== 'unicast') return false;
+
+      if (!range) return false;
+
+      return !BLOCKED_IPV4_RANGES.has(range);
     }
 
-    return addr.range() === 'unicast';
+    const range = addr.range();
+
+    return range === 'unicast';
   } catch {
     return false;
   }
@@ -257,4 +273,4 @@ export function safeLookup(hostname, options, callback) {
     .catch(err => {
       callback(err);
     });
-}
+          }
