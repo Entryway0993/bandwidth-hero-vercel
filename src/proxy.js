@@ -97,9 +97,9 @@ function bypass(req, res, rawBody, statusCode = 200) {
 function sanitizeUrl(url) {
   try {
     const u = new URL(url);
-    return u.origin + u.pathname;
+    return u.origin + '/*';
   } catch {
-    return String(url).split('?')[0];
+    return String(url).split('?')[0].split('/').slice(0, 3).join('/') + '/*';
   }
 }
 
@@ -278,7 +278,15 @@ async function consumeWithLimit(body) {
     chunks.push(chunk);
   }
 
-  return Buffer.concat(chunks);
+  const finalBuffer = Buffer.allocUnsafe(total);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    chunk.copy(finalBuffer, offset);
+    offset += chunk.length;
+  }
+
+  return finalBuffer;
 }
 
 async function safeRequest(url, headers, signal, maxRedirects = 5) {
@@ -291,6 +299,7 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
       err.code = 'UPSTREAM_DEADLINE';
       throw err;
     }
+
     const { statusCode, headers: resHeaders, body } = await request(currentUrl, {
       dispatcher: chromeDispatcher,
       method: 'GET',
@@ -347,13 +356,7 @@ export default async function proxy(req, res) {
     return res.status(503).json({ error: 'Memory pressure. Try again shortly.' });
   }
 
-  const abortController = new AbortController();
-  let isAborted = false;
-
-  res.on('close', () => {
-    isAborted = true;
-    abortController.abort();
-  });
+  // Express 5 natively exposes req.signal for client disconnects
 
   let targetUrl = req.opts?.url || req.query?.url;
 
@@ -442,7 +445,7 @@ export default async function proxy(req, res) {
   let activeHeaders = fetchHeaders;
 
   try {
-    response = await safeRequest(activeUrl, activeHeaders, abortController.signal);
+    response = await safeRequest(activeUrl, activeHeaders, req.signal);
     statusCode = response.statusCode;
     responseHeaders = response.headers;
 
@@ -450,18 +453,18 @@ export default async function proxy(req, res) {
       throw new Error('WORKER_5XX_FAILURE');
     }
   } catch (err) {
-    if (isAborted) return;
+    if (req.signal.aborted) return;
 
     if (isWorkerFetch) {
       activeUrl = targetUrl;
       activeHeaders = headers;
 
       try {
-        response = await safeRequest(activeUrl, activeHeaders, abortController.signal);
+        response = await safeRequest(activeUrl, activeHeaders, req.signal);
         statusCode = response.statusCode;
         responseHeaders = response.headers;
       } catch (fallbackErr) {
-        if (isAborted) return;
+        if (req.signal.aborted) return;
         throw fallbackErr;
       }
     } else {
@@ -473,11 +476,11 @@ export default async function proxy(req, res) {
     const retryHeaders = { ...activeHeaders, 'user-agent': getRandomUA() };
 
     try {
-      response = await safeRequest(activeUrl, retryHeaders, abortController.signal);
+      response = await safeRequest(activeUrl, retryHeaders, req.signal);
       statusCode = response.statusCode;
       responseHeaders = response.headers;
     } catch (err) {
-      if (isAborted) return;
+      if (req.signal.aborted) return;
     }
   }
 
@@ -606,18 +609,25 @@ export default async function proxy(req, res) {
       res.setHeader('Cache-Control', 'no-store');
     } else if (upstreamMaxAge !== null && upstreamMaxAge > 0) {
       const ttl = Math.min(upstreamMaxAge, 30 * 24 * 60 * 60);
-      res.setHeader('Cache-Control', `public, max-age=${ttl}, s-maxage=${ttl}`);
+      res.setHeader('Cache-Control', `public, max-age=${ttl}, s-maxage=${ttl}, stale-while-revalidate=604800, stale-if-error=604800`);
       res.setHeader('x-upstream-max-age', String(upstreamMaxAge));
     } else {
-      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800, stale-if-error=604800');
     }
 
     req.opts.originType = detectedType;
 
+    const requestedFormat = req.opts?.format;
+
+    const formatMatchesDetected =
+      (requestedFormat === 'jpeg' && detectedType === 'image/jpeg') ||
+      (requestedFormat === 'webp' && detectedType === 'image/webp') ||
+      (requestedFormat === 'avif' && detectedType === 'image/avif');
+
     const isModernFormat = detectedType === 'image/webp' || detectedType === 'image/avif';
     const isSmallFile = rawBody.length < 150 * 1024;
 
-    if (isModernFormat && isSmallFile) {
+    if (isModernFormat && isSmallFile && formatMatchesDetected) {
       return bypass(req, res, rawBody, statusCode);
     }
 
@@ -637,7 +647,7 @@ export default async function proxy(req, res) {
 
     return bypass(req, res, rawBody, statusCode);
   } catch (error) {
-    if (isAborted) return;
+    if (req.signal.aborted) return;
 
     const isBodyTooLarge =
       error.message === 'BODY_TOO_LARGE' ||
@@ -653,14 +663,14 @@ export default async function proxy(req, res) {
     }
 
     if (
-  code === 'ETIMEDOUT' ||
-  code === 'ERR_GOT_REQUEST_TIMEOUT' ||
-  code === 'UND_ERR_HEADERS_TIMEOUT' ||
-  code === 'UND_ERR_BODY_TIMEOUT' ||
-  code === 'UPSTREAM_DEADLINE'
-) {
-  return sendGhost(res, 60);
-}
+      code === 'ETIMEDOUT' ||
+      code === 'ERR_GOT_REQUEST_TIMEOUT' ||
+      code === 'UND_ERR_HEADERS_TIMEOUT' ||
+      code === 'UND_ERR_BODY_TIMEOUT' ||
+      code === 'UPSTREAM_DEADLINE'
+    ) {
+      return sendGhost(res, 60);
+    }
 
     // F15: Sanitized error logging with request ID
     console.error(`[PROXY ERROR] [${reqId}]`, sanitizeError(error));
