@@ -37,13 +37,6 @@ const VIEWPORT_FALLBACK = safeInt(process.env.VIEWPORT_FALLBACK, 1080);
 const HEALTH_LAG_THRESHOLD = safeInt(process.env.HEALTH_LAG_THRESHOLD, 100);
 const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
 const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 60000);
-// Unified encode governor
-const MAX_CONCURRENT_ENCODES = safeInt(process.env.MAX_CONCURRENT_ENCODES, 2);
-const ENCODE_DEADLINE_MS = safeInt(process.env.ENCODE_DEADLINE_MS, 25000);
-const ENCODE_RETRY_STEP = safeInt(process.env.ENCODE_RETRY_STEP, 2);
-const ENCODE_MAX_RETRIES = safeInt(process.env.ENCODE_MAX_RETRIES, 2);
-const CHRONOS_SAFETY_MARGIN_MS = safeInt(process.env.CHRONOS_SAFETY_MARGIN_MS, 5000);
-const encodeQueue = [];
 
 const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
 const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 1200);
@@ -108,53 +101,6 @@ const metrics = {
 let activeRequests = 0;
 let activeEncodes = 0;
 let isShuttingDown = false;
-// Unified encode governor: semaphore
-async function acquireEncodeSlot(signal) {
-  if (signal?.aborted) {
-    throw new Error('ENCODE_QUEUE_ABORTED');
-  }
-
-  if (activeEncodes < MAX_CONCURRENT_ENCODES) {
-    activeEncodes++;
-    return;
-  }
-
-  await new Promise((resolve, reject) => {
-    let settled = false;
-
-    const onAbort = () => {
-      if (!settled) {
-        settled = true;
-        const idx = encodeQueue.indexOf(wake);
-        if (idx !== -1) encodeQueue.splice(idx, 1);
-        reject(new Error('ENCODE_QUEUE_ABORTED'));
-      }
-    };
-
-    const wake = () => {
-      if (!settled) {
-        settled = true;
-        if (signal) signal.removeEventListener('abort', onAbort);
-        resolve();
-      }
-    };
-
-    encodeQueue.push(wake);
-
-    if (signal) {
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
-
-  activeEncodes++;
-}
-
-function releaseEncodeSlot() {
-  activeEncodes = Math.max(0, activeEncodes - 1);
-
-  const next = encodeQueue.shift();
-  if (next) next();
-      }
 
 function recordMetric(key, value = 1) {
   if (metrics.featureActivations[key] !== undefined) {
@@ -194,8 +140,6 @@ export function getMetrics() {
     featureActivations: metrics.featureActivations,
     activeRequests,
     activeEncodes,
-    encodeQueueLength: encodeQueue.length,
-    maxConcurrentEncodes: MAX_CONCURRENT_ENCODES,
     isShuttingDown,
     memoryGovernor: {
       rssMB: memoryGovernor.getRssMB(),
@@ -259,94 +203,23 @@ const exactCache = new LRUCache({
 const CHRONOS_WINDOW = 10;
 const rollingByFormat = { avif: [], webp: [] };
 
-function recordEncodeTime(ms, pixelCount, format, effortUsed = 0) {
+function recordEncodeTime(ms, pixelCount, format) {
   if (format !== 'avif' && format !== 'webp') return;
   if (!Number.isFinite(ms) || ms <= 0) return;
   if (!Number.isFinite(pixelCount) || pixelCount <= 0) pixelCount = 1;
-
   const mp = pixelCount / 1_000_000;
   const msPerMegapixel = ms / Math.max(mp, 0.1);
-
   if (!rollingByFormat[format]) rollingByFormat[format] = [];
-
-  rollingByFormat[format].push({
-    rate: msPerMegapixel,
-    effort: effortUsed
-  });
-
+  rollingByFormat[format].push(msPerMegapixel);
   if (rollingByFormat[format].length > CHRONOS_WINDOW) {
     rollingByFormat[format].shift();
   }
 }
 
-function recordEncodeDeadline(format, pixelCount, effortUsed, deadlineMs) {
-  if (format !== 'avif' && format !== 'webp') return;
-  if (!Number.isFinite(pixelCount) || pixelCount <= 0) pixelCount = 1;
-
-  const mp = pixelCount / 1_000_000;
-  const currentAvg = getAverageMsPerMegapixel(format) || 3000;
-
-  const effectiveDeadline =
-    Number.isFinite(deadlineMs) && deadlineMs > 0
-      ? deadlineMs
-      : ENCODE_DEADLINE_MS;
-
-  const deadlineRate =
-    effectiveDeadline > 0
-      ? effectiveDeadline / Math.max(mp, 0.1)
-      : currentAvg * 2;
-
-  const rate = Math.max(currentAvg * 1.5, deadlineRate);
-
-  if (!rollingByFormat[format]) rollingByFormat[format] = [];
-
-  rollingByFormat[format].push({
-    rate,
-    effort: effortUsed
-  });
-
-  if (rollingByFormat[format].length > CHRONOS_WINDOW) {
-    rollingByFormat[format].shift();
-  }
-}
-
-function getAverageMsPerMegapixel(format, effort = null) {
+function getAverageMsPerMegapixel(format) {
   const arr = rollingByFormat[format] || [];
   if (arr.length === 0) return 0;
-
-  let source = arr;
-
-  if (effort !== null) {
-    const exact = arr.filter((sample) => sample.effort === effort);
-    if (exact.length >= 2) source = exact;
-  }
-
-  return source.reduce((a, b) => a + b.rate, 0) / source.length;
-}
-
-function chooseDeadlineEffort(format, pixelCount, baseEffort, budgetMs) {
-  if (format !== 'avif' && format !== 'webp') return baseEffort;
-  if (!Number.isFinite(budgetMs) || budgetMs <= 0) return baseEffort;
-
-  const mp = pixelCount / 1_000_000;
-  let effort = baseEffort;
-  const minEffort = 2;
-
-  while (effort > minEffort) {
-    const avg =
-      getAverageMsPerMegapixel(format, effort) ||
-      getAverageMsPerMegapixel(format);
-
-    if (!avg) break;
-
-    const estimated = avg * Math.max(mp, 0.1);
-
-    if (estimated <= budgetMs) break;
-
-    effort -= 1;
-  }
-
-  return effort;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
 function getColdStartEffort(pixelCount, outputFormat) {
@@ -1260,37 +1133,18 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
-      // CHRONOS v2: pixel/format aware effort
+      // CHRONOS v2
       const chronos = getChronosState(totalPixelCost, outputFormat);
       let effort = chronos.effort;
-      let effortSource = 'chronos';
 
+      // FEATURE: CPU pressure reduces effort
       if (cpuPressure) {
         effort = Math.max(2, effort - 2);
-        effortSource = 'cpu-pressure';
         res.setHeader('X-CPU-Effort-Reduced', 'TRUE');
-      }
-
-      const encodeBudgetMs = ENCODE_DEADLINE_MS > 0
-        ? Math.max(3000, ENCODE_DEADLINE_MS - CHRONOS_SAFETY_MARGIN_MS)
-        : 0;
-
-      const deadlineEffort = chooseDeadlineEffort(
-        outputFormat,
-        totalPixelCost,
-        effort,
-        encodeBudgetMs
-      );
-
-      if (deadlineEffort < effort) {
-        effort = deadlineEffort;
-        effortSource = 'deadline-budget';
-        res.setHeader('X-Deadline-Effort-Reduced', 'TRUE');
       }
 
       res.setHeader('X-Chronos-State', chronos.state);
       res.setHeader('X-Chronos-Effort', String(effort));
-      res.setHeader('X-Effort-Source', effortSource);
 
       // Quality
       let quality = req.opts?.quality ?? (parseInt(req.query.q || req.query.quality) || DEFAULT_QUALITY);
@@ -1545,75 +1399,38 @@ export default async function compress(req, res, buffer, governor) {
         return Buffer.alloc(0);
       }
 
-      // ENCODE — unified semaphore + adaptive Chronos deadline governor
+      // ENCODE
       let outputBuffer;
       let contentType;
       const encodeStart = Date.now();
+      activeEncodes++;
 
-      await acquireEncodeSlot(signal);
-
-      const basePipeline = pipeline;
-      const canClonePipeline = typeof basePipeline.clone === 'function';
-
-      let finalEncodeEffort = effort;
-      let deadlineFallbackUsed = false;
-
-      const encodeAttempt = async (attemptEffort, attemptBudgetMs) => {
-        let attempt;
+      if (ENABLE_TIMEOUT_GUILLOTINE) {
+        const onAbort = () => { pipeline.destroy(); };
+        signal.addEventListener('abort', onAbort, { once: true });
 
         try {
-          attempt = canClonePipeline ? basePipeline.clone() : basePipeline;
-        } catch {
-          attempt = basePipeline;
-        }
-
-        const onAbort = () => {
-          try {
-            if (typeof attempt.destroy === 'function') attempt.destroy();
-          } catch {}
-        };
-
-        if (ENABLE_TIMEOUT_GUILLOTINE) {
-          signal.addEventListener('abort', onAbort, { once: true });
-        }
-
-        let timer = null;
-        let timedOut = false;
-
-        const timeoutPromise = attemptBudgetMs > 0
-          ? new Promise((_, reject) => {
-              timer = setTimeout(() => {
-                timedOut = true;
-
-                try {
-                  if (typeof attempt.destroy === 'function') attempt.destroy();
-                } catch {}
-
-                reject(new Error('ENCODE_DEADLINE'));
-              }, attemptBudgetMs);
-            })
-          : null;
-
-        const encodePromise = (async () => {
           switch (outputFormat) {
             case 'avif':
-              return attempt.avif({
+              outputBuffer = await pipeline.avif({
                 quality: Math.min(quality, 63),
-                effort: Math.min(Math.max(attemptEffort, 0), 9),
+                effort: Math.min(Math.max(effort, 0), 9),
                 chromaSubsampling: getChromaSubsampling(analysis),
               }).toBuffer();
-
+              contentType = 'image/avif';
+              break;
             case 'webp':
-              return attempt.webp({
+              outputBuffer = await pipeline.webp({
                 quality,
-                effort: Math.min(Math.max(attemptEffort, 0), 6),
+                effort: Math.min(Math.max(effort, 0), 6),
                 smartSubsample: true,
                 preset: getWebpPreset(analysis, lineArtResult, origW, origH),
               }).toBuffer();
-
+              contentType = 'image/webp';
+              break;
             case 'jpeg':
             default:
-              return attempt.jpeg({
+              outputBuffer = await pipeline.jpeg({
                 quality,
                 progressive: true,
                 mozjpeg: true,
@@ -1622,127 +1439,54 @@ export default async function compress(req, res, buffer, governor) {
                 overshootDeringing: true,
                 optimiseScans: true,
               }).toBuffer();
+              contentType = 'image/jpeg';
+              break;
           }
-        })();
-
-        if (timeoutPromise) {
-          encodePromise.catch(() => {});
-        }
-
-        try {
-          const result = timeoutPromise
-            ? await Promise.race([encodePromise, timeoutPromise])
-            : await encodePromise;
-
-          if (timer) clearTimeout(timer);
-
-          return { result, timedOut: false };
-        } catch (err) {
-          if (timer) clearTimeout(timer);
-
-          if (timedOut || err?.message === 'ENCODE_DEADLINE') {
-            return { result: null, timedOut: true };
-          }
-
-          throw err;
         } finally {
-          if (ENABLE_TIMEOUT_GUILLOTINE) {
-            signal.removeEventListener('abort', onAbort);
-          }
+          signal.removeEventListener('abort', onAbort);
         }
-      };
-
-      try {
-        let attemptsLeft =
-          ENCODE_DEADLINE_MS > 0 && outputFormat !== 'jpeg'
-            ? ENCODE_MAX_RETRIES + 1
-            : 1;
-
-        let attemptEffort = effort;
-        let remainingBudget =
-          ENCODE_DEADLINE_MS > 0
-            ? ENCODE_DEADLINE_MS
-            : Infinity;
-
-        while (true) {
-          if (signal.aborted) {
-            throw new Error('CLIENT_DISCONNECT');
-          }
-
-          if (Number.isFinite(remainingBudget) && remainingBudget <= 2000) {
-            res.setHeader('X-Encode-Deadline', 'BUDGET_EXHAUSTED');
-            throw new Error('ENCODE_DEADLINE');
-          }
-
-          const attemptBudget = Number.isFinite(remainingBudget)
-            ? Math.max(2000, Math.floor(remainingBudget / attemptsLeft))
-            : 0;
-
-          const attemptStart = Date.now();
-          const attemptResult = await encodeAttempt(attemptEffort, attemptBudget);
-          const attemptElapsed = Date.now() - attemptStart;
-
-          if (attemptResult.timedOut) {
-            recordEncodeDeadline(
-              outputFormat,
-              totalPixelCost,
-              attemptEffort,
-              attemptBudget
-            );
-
-            attemptsLeft -= 1;
-            remainingBudget -= attemptElapsed;
-
-            const cannotRetry =
-              attemptsLeft <= 0 ||
-              attemptEffort <= 2 ||
-              remainingBudget <= 2000 ||
-              outputFormat === 'jpeg' ||
-              !canClonePipeline;
-
-            if (cannotRetry) {
-              res.setHeader('X-Encode-Deadline', 'FAILED');
-              throw new Error('ENCODE_DEADLINE');
-            }
-
-            attemptEffort = Math.max(2, attemptEffort - ENCODE_RETRY_STEP);
-            deadlineFallbackUsed = true;
-
-            res.setHeader('X-Encode-Deadline-Fallback', `EFFORT_${attemptEffort}`);
-            continue;
-          }
-
-          outputBuffer = attemptResult.result;
-          finalEncodeEffort = attemptEffort;
-          break;
+      } else {
+        switch (outputFormat) {
+          case 'avif':
+            outputBuffer = await pipeline.avif({
+              quality: Math.min(quality, 63),
+              effort: Math.min(Math.max(effort, 0), 9),
+              chromaSubsampling: getChromaSubsampling(analysis),
+            }).toBuffer();
+            contentType = 'image/avif';
+            break;
+          case 'webp':
+            outputBuffer = await pipeline.webp({
+              quality,
+              effort: Math.min(Math.max(effort, 0), 6),
+              smartSubsample: true,
+              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+            }).toBuffer();
+            contentType = 'image/webp';
+            break;
+          case 'jpeg':
+          default:
+            outputBuffer = await pipeline.jpeg({
+              quality,
+              progressive: true,
+              mozjpeg: true,
+              chromaSubsampling: getChromaSubsampling(analysis),
+              trellisQuantisation: true,
+              overshootDeringing: true,
+              optimiseScans: true,
+            }).toBuffer();
+            contentType = 'image/jpeg';
+            break;
         }
-      } finally {
-        releaseEncodeSlot();
       }
 
-      contentType = outputFormat === 'avif'
-        ? 'image/avif'
-        : outputFormat === 'webp'
-          ? 'image/webp'
-          : 'image/jpeg';
-
+      activeEncodes--;
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
-      recordEncodeTime(
-        encodeTime,
-        totalPixelCost,
-        outputFormat,
-        finalEncodeEffort
-      );
-
+      recordEncodeTime(encodeTime, totalPixelCost, outputFormat);
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
-      res.setHeader('X-Encode-Effort', String(finalEncodeEffort));
-      res.setHeader('X-Encode-Queue-Limit', String(MAX_CONCURRENT_ENCODES));
-
-      if (deadlineFallbackUsed) {
-        res.setHeader('X-Encode-Deadline-Used', 'TRUE');
-      }
+      res.setHeader('X-Encode-Effort', String(effort));
 
       if (ENABLE_ORACLE_LEDGER) {
         metrics.formatCounts[outputFormat] = (metrics.formatCounts[outputFormat] || 0) + 1;
