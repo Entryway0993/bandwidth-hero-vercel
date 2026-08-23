@@ -740,15 +740,16 @@ async function detectImageType(buffer, metadata) {
     analysisHeight = Math.max(1, Math.round(analysisHeight * scale));
   }
 
-  const statsSource =
-    analysisWidth < width || analysisHeight < height
-      ? await sharp(buffer).resize(analysisWidth, analysisHeight, {
-          fit: 'inside',
-          withoutEnlargement: true
-        }).toBuffer()
-      : buffer;
+  let statsPipeline = sharp(buffer);
 
-  const stats = await sharp(statsSource).stats();
+  if (analysisWidth < width || analysisHeight < height) {
+    statsPipeline = statsPipeline.resize(analysisWidth, analysisHeight, {
+      fit: 'inside',
+      withoutEnlargement: true
+    });
+  }
+
+  const stats = await statsPipeline.stats();
   const { channels } = stats;
 
   let totalEntropy = 0, totalSharpness = 0, colorVariance = 0;
