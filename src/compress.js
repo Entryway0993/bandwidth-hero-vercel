@@ -1245,8 +1245,9 @@ export default async function compress(req, res, buffer, governor) {
           res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
           recordMetric('luminanceFix');
         } else if (analysis.meanLuminance > 210 && analysis.stdevLuminance < 50) {
-          pipeline = pipeline.gamma(0.7);
+          pipeline = pipeline.linear(0.7, 0);
           res.setHeader('X-Luminance-Fix', 'OVEREXPOSED');
+          res.setHeader('X-Luminance-Method', 'LINEAR_DARKEN');
           recordMetric('luminanceFix');
         }
       }
