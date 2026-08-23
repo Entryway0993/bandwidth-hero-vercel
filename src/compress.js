@@ -229,7 +229,7 @@ function getColdStartEffort(pixelCount, outputFormat) {
     if (mp <= 3) return 7;
     if (mp <= 6) return 5;
     if (mp <= 8) return 4;
-    if (mp <= 10) return 3;
+    if (mp <= 12) return 3;
     return 2;
   }
   if (outputFormat === 'webp') {
