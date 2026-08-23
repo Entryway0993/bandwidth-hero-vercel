@@ -943,6 +943,20 @@ export default async function compress(req, res, buffer, governor) {
 
     res.setHeader('X-Format-Reason', formatDecision.reason);
 
+    console.log(JSON.stringify({
+      event: 'FORMAT_DECISION',
+      reqId,
+      url: logUrl,
+      format: outputFormat,
+      reason: formatDecision.reason,
+      width,
+      height,
+      frames,
+      totalPixelCost,
+      avifMaxPixels: AVIF_MAX_PIXELS,
+      avifMaxDimension: AVIF_MAX_DIMENSION
+    }));
+
     const paramFingerprint = [
       outputFormat, req.opts?.quality, req.opts?.grayscale,
       req.opts?.maxDim, req.opts?.maxStripWidth, mode,
