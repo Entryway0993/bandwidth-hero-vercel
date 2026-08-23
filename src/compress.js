@@ -228,6 +228,7 @@ function getColdStartEffort(pixelCount, outputFormat) {
     if (mp <= 1) return 8;
     if (mp <= 3) return 7;
     if (mp <= 6) return 5;
+    if (mp <= 8) return 4;
     if (mp <= 10) return 3;
     return 2;
   }
@@ -938,7 +939,7 @@ export default async function compress(req, res, buffer, governor) {
     let logUrl = 'unknown';
     try {
       const u = new URL(req.opts?.url);
-      logUrl = u.origin + '/*';
+      logUrl = u.origin + u.pathname;
     } catch {}
 
     res.setHeader('X-Format-Reason', formatDecision.reason);
