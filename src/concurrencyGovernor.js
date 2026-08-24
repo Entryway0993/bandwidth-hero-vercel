@@ -29,6 +29,19 @@ let lastAdjustAt = 0;
 let lastReason = 'init';
 let healthyStreak = 0;
 
+// Encode-level adaptive concurrency
+const ENCODE_MIN_LIMIT = safeInt(process.env.ADAPTIVE_ENCODE_MIN, 1);
+const ENCODE_INITIAL_LIMIT = safeInt(process.env.ADAPTIVE_ENCODE_INITIAL, 1);
+const ENCODE_MAX_LIMIT = safeInt(process.env.ADAPTIVE_ENCODE_MAX, 2);
+const ENCODE_COOLDOWN_MS = safeInt(process.env.ADAPTIVE_ENCODE_COOLDOWN_MS, 8000);
+const ENCODE_TIME_THRESHOLD_MS = safeInt(process.env.ADAPTIVE_ENCODE_TIME_MS, 15000);
+
+let encodeLimit = Math.min(Math.max(ENCODE_INITIAL_LIMIT, ENCODE_MIN_LIMIT), ENCODE_MAX_LIMIT);
+let encodeActive = 0;
+let encodeLastAdjustAt = 0;
+let encodeLastReason = 'init';
+let encodeHealthyStreak = 0;
+
 const recentEncodeTimes = [];
 const MAX_SAMPLES = 10;
 
@@ -137,8 +150,82 @@ function getStatus() {
     active,
     lastReason,
     healthyStreak,
-    recentEncodeTimes: recentEncodeTimes.length
+    recentEncodeTimes: recentEncodeTimes.length,
+    encode: {
+      limit: encodeLimit,
+      active: encodeActive,
+      lastReason: encodeLastReason,
+      healthyStreak: encodeHealthyStreak
+    }
   };
+}
+
+function tryAdmitEncode() {
+  if (!ENABLED) return true;
+
+  if (encodeActive >= encodeLimit) {
+    return false;
+  }
+
+  encodeActive++;
+  return true;
+}
+
+function releaseEncode(outcome = {}) {
+  if (encodeActive > 0) encodeActive--;
+
+  if (!ENABLED) return;
+
+  const {
+    success = true,
+    timedOut = false,
+    encodeTimeMs = 0
+  } = outcome;
+
+  const now = Date.now();
+  if (now - encodeLastAdjustAt < ENCODE_COOLDOWN_MS) return;
+
+  const rss = memoryGovernor.getRssMB();
+  const critical = memoryGovernor.isCritical();
+
+  // DECREASE: timeout, critical memory, or very slow encode
+  if (timedOut || critical || encodeTimeMs > ENCODE_TIME_THRESHOLD_MS) {
+    const newLimit = Math.max(ENCODE_MIN_LIMIT, Math.floor(encodeLimit * DECREASE_FACTOR));
+    if (newLimit < encodeLimit) {
+      encodeLimit = newLimit;
+      encodeLastAdjustAt = now;
+      encodeHealthyStreak = 0;
+
+      if (timedOut) encodeLastReason = 'timeout';
+      else if (critical) encodeLastReason = 'memory_critical';
+      else encodeLastReason = 'slow_encode';
+    }
+    return;
+  }
+
+  if (!success) {
+    const newLimit = Math.max(ENCODE_MIN_LIMIT, Math.floor(encodeLimit * DECREASE_FACTOR));
+    if (newLimit < encodeLimit) {
+      encodeLimit = newLimit;
+      encodeLastAdjustAt = now;
+      encodeHealthyStreak = 0;
+      encodeLastReason = 'failure';
+    }
+    return;
+  }
+
+  // INCREASE: healthy encodes
+  encodeHealthyStreak++;
+
+  if (encodeHealthyStreak >= HEALTHY_WINDOW && encodeActive >= encodeLimit) {
+    const newLimit = Math.min(ENCODE_MAX_LIMIT, encodeLimit + 1);
+    if (newLimit > encodeLimit) {
+      encodeLimit = newLimit;
+      encodeLastAdjustAt = now;
+      encodeHealthyStreak = 0;
+      encodeLastReason = 'healthy_ramp';
+    }
+  }
 }
 
 export default {
@@ -149,8 +236,13 @@ export default {
   getLastReason,
   getEnabled,
   getStatus,
+  tryAdmitEncode,
+  releaseEncode,
   ENABLED,
   MIN_LIMIT,
   MAX_LIMIT,
-  INITIAL_LIMIT
+  INITIAL_LIMIT,
+  ENCODE_MIN_LIMIT,
+  ENCODE_MAX_LIMIT,
+  ENCODE_INITIAL_LIMIT
 };
