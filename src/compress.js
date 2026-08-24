@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import { createHash, webcrypto } from 'node:crypto';
 import { LRUCache } from 'lru-cache';
 import memoryGovernor from './memoryGovernor.js';
+import concurrencyGovernor from './concurrencyGovernor.js';
 
 const subtle = webcrypto?.subtle ?? globalThis.crypto?.subtle;
 
@@ -845,8 +846,22 @@ export default async function compress(req, res, buffer, governor) {
     return Buffer.alloc(0);
   }
 
-  activeRequests++;
+  // Adaptive concurrency admission
+  if (!concurrencyGovernor.tryAdmit()) {
+    res.status(503);
+    res.setHeader('X-Adaptive-Concurrency', 'REJECTED');
+    res.setHeader('X-Adaptive-Limit', String(concurrencyGovernor.getLimit()));
+    res.setHeader('X-Adaptive-Active', String(concurrencyGovernor.getActive()));
+    res.setHeader('Retry-After', '2');
+    return Buffer.alloc(0);
+  }
 
+  res.setHeader('X-Adaptive-Concurrency', 'ADMITTED');
+  res.setHeader('X-Adaptive-Limit', String(concurrencyGovernor.getLimit()));
+  res.setHeader('X-Adaptive-Active', String(concurrencyGovernor.getActive()));
+
+  activeRequests++;
+  
   if (ENABLE_ORACLE_LEDGER) {
     metrics.totalRequests++;
     metrics.totalBytesIn += buffer.length;
@@ -878,6 +893,7 @@ export default async function compress(req, res, buffer, governor) {
   }
 
   let totalPixelCost = 0;
+  let finalEncodeTime = 0;
 
   try {
     if (signal.aborted) {
@@ -1485,8 +1501,17 @@ export default async function compress(req, res, buffer, governor) {
       const encodeTime = encodeEnd - encodeStart;
 
       recordEncodeTime(encodeTime, totalPixelCost, outputFormat);
+      finalEncodeTime = encodeTime;
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
       res.setHeader('X-Encode-Effort', String(effort));
+
+      // Report encode time to concurrency governor for adaptive tuning
+      concurrencyGovernor.release({
+        success: true,
+        timedOut: false,
+        encodeTimeMs: encodeTime,
+        eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
+      });
 
       if (ENABLE_ORACLE_LEDGER) {
         metrics.formatCounts[outputFormat] = (metrics.formatCounts[outputFormat] || 0) + 1;
@@ -1680,5 +1705,12 @@ export default async function compress(req, res, buffer, governor) {
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     activeRequests--;
+
+    concurrencyGovernor.release({
+      success: !clientDisconnected && !signal.aborted,
+      timedOut: signal.aborted,
+      encodeTimeMs: finalEncodeTime,
+      eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
+    });
   }
   }
