@@ -228,11 +228,11 @@ function getAverageMsPerMegapixel(format) {
 function getColdStartEffort(pixelCount, outputFormat) {
   const mp = pixelCount / 1_000_000;
   if (outputFormat === 'avif') {
-    if (mp <= 1) return 8;
-    if (mp <= 3) return 7;
-    if (mp <= 6) return 5;
-    if (mp <= 10) return 4;
-    if (mp <= 18) return 3;
+    if (mp <= 1) return 7;
+    if (mp <= 3) return 6;
+    if (mp <= 6) return 4;
+    if (mp <= 10) return 3;
+    if (mp <= 18) return 2;
     return 2;
   }
   if (outputFormat === 'webp') {
