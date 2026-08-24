@@ -1509,6 +1509,11 @@ export default async function compress(req, res, buffer, governor) {
         }
       } finally {
         activeEncodes--;
+        concurrencyGovernor.releaseEncode({
+          success: !clientDisconnected && !signal.aborted,
+          timedOut: signal.aborted,
+          encodeTimeMs: finalEncodeTime
+        });
       }
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
