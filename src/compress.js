@@ -1419,13 +1419,61 @@ export default async function compress(req, res, buffer, governor) {
       let outputBuffer;
       let contentType;
       const encodeStart = Date.now();
+      // Encode-level adaptive admission
+      if (!concurrencyGovernor.tryAdmitEncode()) {
+        res.status(503);
+        res.setHeader('X-Adaptive-Concurrency', 'ENCODE_REJECTED');
+        res.setHeader('X-Adaptive-Encode-Limit', String(concurrencyGovernor.getStatus().encode.limit));
+        res.setHeader('Retry-After', '3');
+        return Buffer.alloc(0);
+      }
+
+      res.setHeader('X-Adaptive-Encode-Active', String(concurrencyGovernor.getStatus().encode.active));
+
       activeEncodes++;
 
-      if (ENABLE_TIMEOUT_GUILLOTINE) {
-        const onAbort = () => { pipeline.destroy(); };
-        signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        if (ENABLE_TIMEOUT_GUILLOTINE) {
+          const onAbort = () => { pipeline.destroy(); };
+          signal.addEventListener('abort', onAbort, { once: true });
 
-        try {
+          try {
+            switch (outputFormat) {
+              case 'avif':
+                outputBuffer = await pipeline.avif({
+                  quality: Math.min(quality, 63),
+                  effort: Math.min(Math.max(effort, 0), 9),
+                  chromaSubsampling: getChromaSubsampling(analysis),
+                }).toBuffer();
+                contentType = 'image/avif';
+                break;
+              case 'webp':
+                outputBuffer = await pipeline.webp({
+                  quality,
+                  effort: Math.min(Math.max(effort, 0), 6),
+                  smartSubsample: true,
+                  preset: getWebpPreset(analysis, lineArtResult, origW, origH),
+                }).toBuffer();
+                contentType = 'image/webp';
+                break;
+              case 'jpeg':
+              default:
+                outputBuffer = await pipeline.jpeg({
+                  quality,
+                  progressive: true,
+                  mozjpeg: true,
+                  chromaSubsampling: getChromaSubsampling(analysis),
+                  trellisQuantisation: true,
+                  overshootDeringing: true,
+                  optimiseScans: true,
+                }).toBuffer();
+                contentType = 'image/jpeg';
+                break;
+            }
+          } finally {
+            signal.removeEventListener('abort', onAbort);
+          }
+        } else {
           switch (outputFormat) {
             case 'avif':
               outputBuffer = await pipeline.avif({
@@ -1458,45 +1506,10 @@ export default async function compress(req, res, buffer, governor) {
               contentType = 'image/jpeg';
               break;
           }
-        } finally {
-          signal.removeEventListener('abort', onAbort);
         }
-      } else {
-        switch (outputFormat) {
-          case 'avif':
-            outputBuffer = await pipeline.avif({
-              quality: Math.min(quality, 63),
-              effort: Math.min(Math.max(effort, 0), 9),
-              chromaSubsampling: getChromaSubsampling(analysis),
-            }).toBuffer();
-            contentType = 'image/avif';
-            break;
-          case 'webp':
-            outputBuffer = await pipeline.webp({
-              quality,
-              effort: Math.min(Math.max(effort, 0), 6),
-              smartSubsample: true,
-              preset: getWebpPreset(analysis, lineArtResult, origW, origH),
-            }).toBuffer();
-            contentType = 'image/webp';
-            break;
-          case 'jpeg':
-          default:
-            outputBuffer = await pipeline.jpeg({
-              quality,
-              progressive: true,
-              mozjpeg: true,
-              chromaSubsampling: getChromaSubsampling(analysis),
-              trellisQuantisation: true,
-              overshootDeringing: true,
-              optimiseScans: true,
-            }).toBuffer();
-            contentType = 'image/jpeg';
-            break;
-        }
+      } finally {
+        activeEncodes--;
       }
-
-      activeEncodes--;
       const encodeEnd = Date.now();
       const encodeTime = encodeEnd - encodeStart;
 
