@@ -118,6 +118,7 @@ export function getMetrics() {
   const compressionRatio = metrics.totalBytesIn > 0
     ? ((1 - metrics.totalBytesOut / metrics.totalBytesIn) * 100).toFixed(2) + '%' : '0%';
 
+
   return {
     uptime: `${Math.floor(uptime / 1000)}s`,
     totalRequests: metrics.totalRequests,
@@ -148,7 +149,8 @@ export function getMetrics() {
       pixelBudget: memoryGovernor.getPixelBudget(),
       activePixels: memoryGovernor.getActivePixelCost(),
       ceilingMB: memoryGovernor.MEMORY_CEILING_MB
-    }
+    },
+    concurrencyGovernor: concurrencyGovernor.getStatus()
   };
 }
 
@@ -1649,12 +1651,23 @@ export default async function compress(req, res, buffer, governor) {
         const value = enhancementState[key];
         return value === true || (typeof value === 'string' && value.length > 0 && value !== 'false');
       });
+      
+      const concurrencyStatus = concurrencyGovernor.getStatus();
 
       console.log(JSON.stringify({
         event: 'COMPRESS',
         reqId,
         activeRequests,
         activeEncodes,
+        concurrency: {
+          enabled: concurrencyStatus.enabled,
+          requestLimit: concurrencyStatus.limit,
+          requestActive: concurrencyStatus.active,
+          requestReason: concurrencyStatus.lastReason,
+          encodeLimit: concurrencyStatus.encode.limit,
+          encodeActive: concurrencyStatus.encode.active,
+          encodeReason: concurrencyStatus.encode.lastReason
+        },
         url: (() => {
           try {
             const u = new URL(req.opts?.url);
