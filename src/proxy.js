@@ -275,13 +275,7 @@ async function consumeWithLimit(body) {
     chunks.push(chunk);
   }
 
-  const finalBuffer = Buffer.allocUnsafe(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    chunk.copy(finalBuffer, offset);
-    offset += chunk.length;
-  }
-  return finalBuffer;
+  return Buffer.concat(chunks, total);
 }
 
 async function safeRequest(url, headers, signal, maxRedirects = 5) {
