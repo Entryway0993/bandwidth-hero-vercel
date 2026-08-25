@@ -784,11 +784,12 @@ async function detectImageType(buffer, metadata) {
   const aspectRatio = (metadata.height || 0) / Math.max(metadata.width || 1, 1);
   const isMangaStrip = aspectRatio > 2.5;
   const isMangaPage = aspectRatio > 1.2 && aspectRatio < 2.0 && isGrayscale;
+  const isMangaWidePage = aspectRatio < 1.0 && aspectRatio > 0.4 && isGrayscale;
   const isAnime = isColorful && totalSharpness > 100;
 
   return {
     isGrayscale, isHighContrast, isColorful,
-    isMangaStrip, isMangaPage, isAnime,
+    isMangaStrip, isMangaPage, isMangaWidePage, isAnime,
     entropy: totalEntropy, sharpness: totalSharpness,
     colorVariance, aspectRatio,
     meanLuminance, stdevLuminance, maxLuminance
@@ -1371,7 +1372,7 @@ export default async function compress(req, res, buffer, governor) {
       // Sharpen - boosted for text images
       const contentWantsSharpen =
         sharpenPreference !== false &&
-        (analysis.sharpness < 50 || isTextHeavy) &&
+        (analysis.sharpness < 50 || isTextHeavy || analysis.isMangaWidePage) &&
         !analysis.isMangaStrip;
 
       if (allowEnhancements && (sharpenPreference === true || contentWantsSharpen)) {
@@ -1598,10 +1599,11 @@ export default async function compress(req, res, buffer, governor) {
       }
 
       res.setHeader('X-Image-Type', analysis.isMangaStrip ? 'manga-strip' :
+        analysis.isMangaWidePage ? 'manga-wide' :
         analysis.isMangaPage ? 'manga-page' :
         analysis.isAnime ? 'anime' :
         analysis.isGrayscale ? 'grayscale' : 'photo');
-
+      
       const getHeaderStr = (name) => {
         const v = res.getHeader(name);
         return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
@@ -1691,6 +1693,7 @@ export default async function compress(req, res, buffer, governor) {
         outputDims: `${targetWidth || origW}x${targetHeight || origH}`,
         pixelCost: totalPixelCost,
         imageType: analysis.isMangaStrip ? 'manga-strip' :
+          analysis.isMangaWidePage ? 'manga-wide' :
           analysis.isMangaPage ? 'manga-page' :
           analysis.isAnime ? 'anime' :
           analysis.isGrayscale ? 'grayscale' : 'photo',
