@@ -1107,7 +1107,7 @@ export default async function compress(req, res, buffer, governor) {
 
       // Deskew
       let skewAngle = 0;
-      if (ENABLE_DESKEW && allowEnhancements && !isStripMode && !analysis.isMangaStrip) {
+      if (ENABLE_DESKEW && allowEnhancements && !isStripMode && !analysis.isMangaStrip && !analysis.isMangaPage && !analysis.isMangaWidePage) {
         skewAngle = await detectSkew(buffer);
         if (skewAngle !== 0) {
           res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
