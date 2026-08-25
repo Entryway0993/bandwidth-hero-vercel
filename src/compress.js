@@ -204,12 +204,17 @@ const exactCache = new LRUCache({
 // CHRONOS v2
 // ============================================================
 const CHRONOS_WINDOW = 10;
+const CHRONOS_MIN_PIXELS = safeInt(process.env.CHRONOS_MIN_PIXELS, 1_000_000);
 const rollingByFormat = { avif: [], webp: [] };
 
 function recordEncodeTime(ms, pixelCount, format) {
   if (format !== 'avif' && format !== 'webp') return;
   if (!Number.isFinite(ms) || ms <= 0) return;
   if (!Number.isFinite(pixelCount) || pixelCount <= 0) pixelCount = 1;
+
+  // Skip tiny images — their ms/MP ratio is unreliable and pollutes the average
+  if (pixelCount < CHRONOS_MIN_PIXELS) return;
+
   const mp = pixelCount / 1_000_000;
   const msPerMegapixel = ms / Math.max(mp, 0.1);
   if (!rollingByFormat[format]) rollingByFormat[format] = [];
@@ -1714,8 +1719,9 @@ export default async function compress(req, res, buffer, governor) {
         memGov.releasePixels(totalPixelCost);
       }
     }
-  } catch (err) {
+} catch (err) {
     if (clientDisconnected || signal.aborted) {
+      console.error(`[CLIENT_DISCONNECT] [${reqId}] Client aborted connection. Encode time: ${Date.now() - startedAt}ms, Pixel Cost: ${totalPixelCost}`);
       res.setHeader('X-Timeout-Guillotine', 'ABORTED');
       return Buffer.alloc(0);
     }
