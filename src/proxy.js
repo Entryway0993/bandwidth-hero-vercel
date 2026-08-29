@@ -85,8 +85,158 @@ function getRandomUA() {
 
 const GHOST_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
-function sendGhost(res, cacheSeconds = 3600) {
+const GHOST_SVG_MAX_DIM = 64;
+const GHOST_MAX_DIM_PARSE = 100000;
+
+function isValidGhostDim(value) {
+  return Number.isInteger(value) && value > 0 && value <= GHOST_MAX_DIM_PARSE;
+}
+
+function ghostSvgFromDims(width, height) {
+  if (!isValidGhostDim(width) || !isValidGhostDim(height)) {
+    return null;
+  }
+
+  const longEdge = Math.max(width, height);
+  const scale = Math.min(1, GHOST_SVG_MAX_DIM / longEdge);
+
+  const outW = Math.max(1, Math.round(width * scale));
+  const outH = Math.max(1, Math.round(height * scale));
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${outW}" height="${outH}" viewBox="0 0 ${width} ${height}">` +
+    `<rect width="100%" height="100%" fill="transparent"/>` +
+    `</svg>`;
+
+  return Buffer.from(svg);
+}
+
+function extractGhostDims(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 10) {
+    return null;
+  }
+
+  // PNG
+  if (
+    buffer.length >= 24 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4E &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0D &&
+    buffer[5] === 0x0A &&
+    buffer[6] === 0x1A &&
+    buffer[7] === 0x0A
+  ) {
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+
+    return isValidGhostDim(width) && isValidGhostDim(height)
+      ? { width, height }
+      : null;
+  }
+
+  // GIF
+  const gifSig = buffer.toString('ascii', 0, 6);
+  if (gifSig === 'GIF87a' || gifSig === 'GIF89a') {
+    const width = buffer.readUInt16LE(6);
+    const height = buffer.readUInt16LE(8);
+
+    return isValidGhostDim(width) && isValidGhostDim(height)
+      ? { width, height }
+      : null;
+  }
+
+  // JPEG
+  if (
+    buffer[0] === 0xFF &&
+    buffer[1] === 0xD8 &&
+    buffer[2] === 0xFF
+  ) {
+    let offset = 2;
+    const maxScan = Math.min(buffer.length, 1_000_000);
+
+    while (offset + 4 <= maxScan) {
+      if (buffer[offset] !== 0xFF) {
+        offset++;
+        continue;
+      }
+
+      const marker = buffer[offset + 1];
+
+      // Skip fill bytes.
+      if (marker === 0xFF) {
+        offset++;
+        continue;
+      }
+
+      // SOI.
+      if (marker === 0xD8) {
+        offset += 2;
+        continue;
+      }
+
+      // EOI or SOS: stop scanning.
+      if (marker === 0xD9 || marker === 0xDA) {
+        break;
+      }
+
+      // SOF markers, excluding DHT/JPG/DAC-style markers.
+      if (
+        marker >= 0xC0 &&
+        marker <= 0xCF &&
+        marker !== 0xC4 &&
+        marker !== 0xC8 &&
+        marker !== 0xCC
+      ) {
+        if (offset + 9 <= maxScan) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+
+          return isValidGhostDim(width) && isValidGhostDim(height)
+            ? { width, height }
+            : null;
+        }
+
+        break;
+      }
+
+      const segmentLength = buffer.readUInt16BE(offset + 2);
+
+      if (!Number.isFinite(segmentLength) || segmentLength < 2) {
+        break;
+      }
+
+      offset += 2 + segmentLength;
+    }
+  }
+
+  return null;
+}
+
+function sendGhost(res, cacheSeconds = 3600, hint = null) {
   if (!res.headersSent) {
+    const accept = String(hint?.accept || '');
+    const body = hint?.body;
+
+    if (
+      accept.includes('image/svg+xml') &&
+      Buffer.isBuffer(body) &&
+      body.length > 0
+    ) {
+      const dims = extractGhostDims(body);
+      const svg = dims ? ghostSvgFromDims(dims.width, dims.height) : null;
+
+      if (svg) {
+        res.setHeader('Content-Type', 'image/svg+xml');
+        res.setHeader('Cache-Control', `public, max-age=${cacheSeconds}`);
+        res.setHeader('Vary', 'Accept');
+        res.setHeader('x-ghost', 'true');
+        res.status(200).end(svg);
+        return;
+      }
+    }
+
     res.setHeader('Content-Type', 'image/gif');
     res.setHeader('Cache-Control', `public, max-age=${cacheSeconds}`);
     res.setHeader('x-ghost', 'true');
@@ -483,8 +633,8 @@ export default async function proxy(req, res) {
 
     const downloadBudget = memoryGovernor.getDownloadBudget();
     if (rawBody.length > downloadBudget) {
-      return sendGhost(res, 3600);
-    }
+  return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
+}
 
     if (statusCode === 200 && rawBody.length <= RAW_VAULT_MAX_ENTRY) {
       const upstreamEtag = responseHeaders['etag'] || null;
@@ -510,12 +660,12 @@ export default async function proxy(req, res) {
       });
     }
 
-    if (statusCode === 404 || statusCode === 410) return sendGhost(res, 86400);
-    if (statusCode === 403) return sendGhost(res, 3600);
-    if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) return sendGhost(res, 60);
+    if (statusCode === 404 || statusCode === 410) return sendGhost(res, 86400, { body: rawBody, accept: req.headers.accept });
+if (statusCode === 403) return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
+if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) return sendGhost(res, 60, { body: rawBody, accept: req.headers.accept });
 
     const detectedType = detectContentType(rawBody);
-    if (!detectedType.startsWith('image/')) return sendGhost(res, 3600);
+if (!detectedType.startsWith('image/')) return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
 
     if (req.query?.debug === '1') {
       try {
@@ -656,7 +806,7 @@ export default async function proxy(req, res) {
 
         if (!retrySuccess && !compressedResult) {
           console.error(`[CORRUPT RETRY] [${reqId}] All retry attempts exhausted`);
-          return sendGhost(res, 3600);
+return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
         }
       } else if (compressError) {
         throw compressError;
