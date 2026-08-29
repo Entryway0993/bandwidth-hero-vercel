@@ -345,20 +345,30 @@ async function detectAlphaBounds(buffer, metadata) {
     const alphaIdx = channels - 1;
 
     let minX = w, minY = h, maxX = 0, maxY = 0;
-    let foundOpaque = false;
+let foundOpaque = false;
+let fullBounds = false;
+let idx = alphaIdx;
 
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const alpha = data[(y * w + x) * channels + alphaIdx];
-        if (alpha > 0) {
-          foundOpaque = true;
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
+for (let y = 0; y < h; y++) {
+  for (let x = 0; x < w; x++, idx += channels) {
+    if (data[idx] > 0) {
+      foundOpaque = true;
+
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+
+      // If opaque pixels touch all four sampled edges, bounds cannot expand further.
+      if (minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
+        fullBounds = true;
+        break;
       }
     }
+  }
+
+  if (fullBounds) break;
+}
 
     if (!foundOpaque) return null;
     if (minX >= maxX || minY >= maxY) return null;
