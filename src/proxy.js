@@ -272,6 +272,10 @@ function sanitizeError(err) {
   return msg;
 }
 
+function isClientAborted(req) {
+  return Boolean(req?.signal?.aborted);
+}
+
 // FEATURE: Corrupted Image Auto-Retry — detect sharp decode failures
 function isSharpDecodeError(err) {
   if (!err) return false;
@@ -574,7 +578,7 @@ export default async function proxy(req, res) {
   let activeHeaders = fetchHeaders;
 
   try {
-    response = await safeRequest(activeUrl, activeHeaders, req.signal);
+    response = await safeRequest(activeUrl, activeHeaders, req?.signal);
     statusCode = response.statusCode;
     responseHeaders = response.headers;
 
@@ -582,14 +586,14 @@ export default async function proxy(req, res) {
       throw new Error('WORKER_5XX_FAILURE');
     }
   } catch (err) {
-    if (req.signal.aborted) return;
+    if (isClientAborted(req)) return;
 
     if (isWorkerFetch) {
       activeUrl = targetUrl;
       activeHeaders = headers;
 
       try {
-        response = await safeRequest(activeUrl, activeHeaders, req.signal);
+        response = await safeRequest(activeUrl, activeHeaders, req?.signal);
         statusCode = response.statusCode;
         responseHeaders = response.headers;
       } catch (fallbackErr) {
@@ -608,7 +612,7 @@ export default async function proxy(req, res) {
       statusCode = response.statusCode;
       responseHeaders = response.headers;
     } catch (err) {
-      if (req.signal.aborted) return;
+      if (isClientAborted(req)) return;
     }
   }
 
@@ -757,7 +761,7 @@ if (!detectedType.startsWith('image/')) return sendGhost(res, 3600, { body: rawB
         let retrySuccess = false;
 
         for (let attempt = 1; attempt <= MAX_DECODE_RETRIES; attempt++) {
-          if (req.signal.aborted) return;
+          if (isClientAborted(req)) return;
 
           try {
             const retryHeaders = {
@@ -795,7 +799,7 @@ if (!detectedType.startsWith('image/')) return sendGhost(res, 3600, { body: rawB
             rawBody = decompressedRetry;
             break;
           } catch (retryErr) {
-            if (req.signal.aborted) return;
+            if (isClientAborted(req)) return;
             if (!isSharpDecodeError(retryErr)) {
               compressedResult = null;
               break;
@@ -825,7 +829,7 @@ return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
 
     return bypass(req, res, rawBody, statusCode);
   } catch (error) {
-    if (req.signal.aborted) return;
+    if (isClientAborted(req)) return;
 
     const isBodyTooLarge =
       error.message === 'BODY_TOO_LARGE' ||
