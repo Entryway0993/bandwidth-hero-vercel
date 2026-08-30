@@ -911,7 +911,8 @@ export default async function compress(req, res, buffer, governor) {
   }
 
   let totalPixelCost = 0;
-  let finalEncodeTime = 0;
+let finalEncodeTime = 0;
+let eventLoopLag;
 
   try {
     if (signal.aborted) {
@@ -1054,9 +1055,9 @@ export default async function compress(req, res, buffer, governor) {
 
     res.setHeader('X-Memory-Governor', 'ADMITTED');
     res.setHeader('X-Pixel-Cost', String(totalPixelCost));
-
+    
     // FEATURE: CPU/event-loop pressure governor
-    const eventLoopLag = await measureEventLoopLag();
+eventLoopLag = await measureEventLoopLag();
     const cpuPressure = eventLoopLag > CPU_LAG_THRESHOLD_MS;
 
     res.setHeader('X-CPU-Lag', `${eventLoopLag.toFixed(2)}ms`);
@@ -1541,13 +1542,7 @@ export default async function compress(req, res, buffer, governor) {
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
       res.setHeader('X-Encode-Effort', String(effort));
 
-      // Report encode time to concurrency governor for adaptive tuning
-      concurrencyGovernor.release({
-        success: true,
-        timedOut: false,
-        encodeTimeMs: encodeTime,
-        eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
-      });
+      // Request-level release is handled exactly once in the outer finally.
 
       if (ENABLE_ORACLE_LEDGER) {
         metrics.formatCounts[outputFormat] = (metrics.formatCounts[outputFormat] || 0) + 1;
