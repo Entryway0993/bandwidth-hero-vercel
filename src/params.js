@@ -44,6 +44,9 @@ const ALLOWED_MODES = new Set([
 // F13-MODIFIED: Safe rotation increments only
 const SAFE_ROTATIONS = new Set([90, 180, 270]);
 
+const INTERNAL_FORMAT_PARAM = '__bw_fmt';
+const INTERNAL_FORMATS = new Set(['jpeg', 'avif', 'webp']);
+
 function parseBoolean(value, defaultValue) {
   if (Array.isArray(value)) {
     value = value[0];
@@ -76,7 +79,20 @@ function parseRotation(value) {
   return 0;
 }
 
+function parseInternalFormat(req) {
+  const raw = Array.isArray(req.query[INTERNAL_FORMAT_PARAM])
+    ? req.query[INTERNAL_FORMAT_PARAM][0]
+    : req.query[INTERNAL_FORMAT_PARAM];
+
+  const fmt = String(raw || '').toLowerCase();
+
+  return INTERNAL_FORMATS.has(fmt) ? fmt : null;
+}
+
 function parseFormat(req) {
+  const internalFormat = parseInternalFormat(req);
+  if (internalFormat) return internalFormat;
+
   if (parseBoolean(req.query.jpeg, false)) return 'jpeg';
   if (parseBoolean(req.query.avif, false)) return 'avif';
   if (parseBoolean(req.query.webp, false)) return 'webp';
