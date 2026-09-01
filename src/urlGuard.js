@@ -68,8 +68,29 @@ function normalizeHost(hostname) {
   return host;
 }
 
+function isPublicIPv4Compat(ipv4String) {
+  // Reuse the same logic as the main IPv4 check.
+  // If the embedded IPv4 is private, return false (block it).
+  try {
+    const addr = ipaddr.parse(ipv4String);
+    const range = addr.range();
+    if (!range) return false;
+    return !BLOCKED_IPV4_RANGES.has(range);
+  } catch {
+    return false;
+  }
+}
+
 export function isPublicIP(ip) {
   try {
+    // Block IPv4-compatible IPv6 forms like ::192.168.1.1
+    // These are deprecated but could be used to bypass SSRF filters.
+    const lower = String(ip).toLowerCase();
+    const compatMatch = lower.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
+    if (compatMatch && !isPublicIPv4Compat(compatMatch[1])) {
+      return false;
+    }
+
     let addr = ipaddr.parse(ip);
 
     if (addr.kind() === 'ipv6' && addr.isIPv4MappedAddress()) {
