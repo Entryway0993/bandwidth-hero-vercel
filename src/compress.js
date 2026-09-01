@@ -40,7 +40,6 @@ const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
 const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 60000);
 
 const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
-const AVIF_MAX_DIMENSION = safeInt(process.env.AVIF_MAX_DIMENSION, 1200);
 
 const ANALYSIS_MAX_DIM = safeInt(process.env.ANALYSIS_MAX_DIM, 4096);
 const ANALYSIS_MAX_PIXELS = safeInt(process.env.ANALYSIS_MAX_PIXELS, 16_000_000);
@@ -990,10 +989,9 @@ let eventLoopLag;
       height,
       frames,
       totalPixelCost,
-      avifMaxPixels: AVIF_MAX_PIXELS,
-      avifMaxDimension: AVIF_MAX_DIMENSION
+      avifMaxPixels: AVIF_MAX_PIXELS
     }));
-
+    
     const paramFingerprint = [
       outputFormat, req.opts?.quality, req.opts?.grayscale,
       req.opts?.maxDim, req.opts?.maxStripWidth, mode,
