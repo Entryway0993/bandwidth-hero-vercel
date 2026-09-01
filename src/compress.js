@@ -597,7 +597,7 @@ function getWebpPreset(analysis, lineArtResult, origW, origH) {
   return 'default';
 }
 
-function judgeQuality(analysis, metadata) {
+function judgeQuality(analysis, metadata, mode) {
   const sharpness = analysis.sharpness || 0;
   const width = metadata.width || 0;
   const height = metadata.height || 0;
@@ -605,8 +605,22 @@ function judgeQuality(analysis, metadata) {
   const colorVariance = analysis.colorVariance || 0;
   const aspectRatio = height / Math.max(width, 1);
   const isVerticalStrip = aspectRatio > 2.5;
-  const isMangaContent = analysis.isMangaStrip || analysis.isMangaPage ||
-    analysis.isMangaWidePage || analysis.isGrayscale;
+
+  // Explicit mode takes priority over heuristic detection.
+  // 'auto' or undefined falls back to content analysis.
+  const explicitMangaModes = ['manga', 'comic', 'strip', 'webtoon', 'manhwa', 'manhua'];
+  const explicitPhotoModes = ['photo', 'normal'];
+
+  let isMangaContent;
+  if (explicitMangaModes.includes(mode)) {
+    isMangaContent = true;
+  } else if (explicitPhotoModes.includes(mode)) {
+    isMangaContent = false;
+  } else {
+    // auto / undefined: fall back to heuristic detection
+    isMangaContent = analysis.isMangaStrip || analysis.isMangaPage ||
+      analysis.isMangaWidePage || analysis.isGrayscale;
+  }
 
   // For vertical strips, width is the detail-level indicator.
   // Multiply by 2 to normalize against photo resolution expectations.
@@ -1183,7 +1197,7 @@ eventLoopLag = await measureEventLoopLag();
       // Judge quality
       let judgeResult = null;
       if (ENABLE_JUDGE && allowEnhancements) {
-        judgeResult = judgeQuality(analysis, metadata);
+        judgeResult = judgeQuality(analysis, metadata, req.opts?.mode);
       }
 
       // Halftone / moire detection
