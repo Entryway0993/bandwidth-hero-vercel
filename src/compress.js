@@ -619,7 +619,7 @@ function judgeQuality(analysis, metadata, mode) {
   } else {
     // auto / undefined: fall back to heuristic detection
     isMangaContent = analysis.isMangaStrip || analysis.isMangaPage ||
-      analysis.isMangaWidePage || analysis.isGrayscale;
+      analysis.isMangaWidePage;
   }
 
   // For vertical strips, width is the detail-level indicator.
