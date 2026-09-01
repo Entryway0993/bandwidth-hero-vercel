@@ -1,5 +1,9 @@
-// Force V8 heap limit before any imports load
-process.env.NODE_OPTIONS = '--max-old-space-size=1024';
+// NOTE: Heap limit must be set at startup, not at runtime.
+// NODE_OPTIONS is read by Node before module code executes.
+// Setting it here has no effect on the current process.
+// Configure via platform env or launch script instead:
+//   NODE_OPTIONS=--max-old-space-size=1024 node server.js
+// Or via Vercel/project environment configuration.
 
 import 'dotenv/config';
 import express from 'express';
