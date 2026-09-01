@@ -88,9 +88,10 @@ export default function authenticate(req, res, next) {
   // F5-MODIFIED: Prevent referer leakage of query keys
   res.setHeader('Referrer-Policy', 'no-referrer');
 
-  const clientKey = req.headers['x-api-key'] ||
-    req.query.api || req.query.apikey || req.query.api_key ||
-    req.ip || 'unknown';
+  // F6: Rate limit auth failures by IP to prevent bucket-churning via rotating fake keys.
+  // Attackers can bypass per-key limits by sending a new invalid key per request.
+  const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+  const clientKey = `ip:${clientIp}`;
 
   // F6: Rate limit auth failures
   if (isAuthRateLimited(clientKey)) {
