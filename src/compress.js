@@ -1075,7 +1075,19 @@ eventLoopLag = await measureEventLoopLag();
     }
 
     try {
-      const analysis = await detectImageType(buffer, metadata);
+      let analysis;
+      if (cpuPressure) {
+        // Under CPU pressure, skip expensive sharp().stats() analysis.
+        // All enhancement features are already disabled, so neutral defaults are safe.
+        analysis = {
+          isGrayscale: false, isHighContrast: false, isColorful: false,
+          isMangaStrip: false, isMangaPage: false, isMangaWidePage: false, isAnime: false,
+          entropy: 0, sharpness: 0, colorVariance: 0, aspectRatio: 1,
+          meanLuminance: 128, stdevLuminance: 50, maxLuminance: 255
+        };
+      } else {
+        analysis = await detectImageType(buffer, metadata);
+      }
       const viewportMaxDim = getViewportMaxDim(req);
 
       let placeholder = thumbResult ? thumbResult.placeholder : null;
