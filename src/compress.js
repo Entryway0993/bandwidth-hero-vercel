@@ -605,29 +605,67 @@ function judgeQuality(analysis, metadata) {
   const colorVariance = analysis.colorVariance || 0;
   const aspectRatio = height / Math.max(width, 1);
   const isVerticalStrip = aspectRatio > 2.5;
-  const resolution = isVerticalStrip ? width : Math.max(width, height);
+  const isMangaContent = analysis.isMangaStrip || analysis.isMangaPage ||
+    analysis.isMangaWidePage || analysis.isGrayscale;
+
+  // For vertical strips, width is the detail-level indicator.
+  // Multiply by 2 to normalize against photo resolution expectations.
+  const resolution = isVerticalStrip
+    ? Math.min(width * 2, 3000)
+    : Math.max(width, height);
 
   let score = 0;
-  if (sharpness > 80) score += 35;
-  else if (sharpness > 60) score += 28;
-  else if (sharpness > 40) score += 21;
-  else if (sharpness > 25) score += 14;
-  else if (sharpness > 15) score += 7;
 
+  // Sharpness
+  if (isMangaContent) {
+    // Manga: sharp lines are the primary quality signal
+    if (sharpness > 60) score += 35;
+    else if (sharpness > 40) score += 30;
+    else if (sharpness > 25) score += 22;
+    else if (sharpness > 15) score += 14;
+    else if (sharpness > 8) score += 7;
+  } else {
+    // Photo: original thresholds
+    if (sharpness > 80) score += 35;
+    else if (sharpness > 60) score += 28;
+    else if (sharpness > 40) score += 21;
+    else if (sharpness > 25) score += 14;
+    else if (sharpness > 15) score += 7;
+  }
+
+  // Resolution
   if (resolution > 2000) score += 25;
   else if (resolution > 1500) score += 20;
   else if (resolution > 1000) score += 15;
   else if (resolution > 700) score += 10;
   else if (resolution > 400) score += 5;
 
-  if (entropy > 5 && entropy < 7) score += 25;
-  else if (entropy > 4 && entropy < 8) score += 18;
-  else if (entropy > 3 && entropy < 8.5) score += 12;
-  else score += 5;
+  // Entropy
+  if (isMangaContent) {
+    // Manga: low entropy is normal for clean line art
+    if (entropy > 3 && entropy < 6) score += 25;
+    else if (entropy > 2 && entropy < 7) score += 20;
+    else if (entropy > 1.5 && entropy < 7.5) score += 14;
+    else score += 8;
+  } else {
+    // Photo: original thresholds
+    if (entropy > 5 && entropy < 7) score += 25;
+    else if (entropy > 4 && entropy < 8) score += 18;
+    else if (entropy > 3 && entropy < 8.5) score += 12;
+    else score += 5;
+  }
 
-  if (colorVariance > 80) score += 15;
-  else if (colorVariance > 40) score += 8;
-  else if (colorVariance < 15) score -= 10;
+  // Color variance
+  if (isMangaContent && analysis.isGrayscale) {
+    // Grayscale manga: no penalty, small bonus for clean B&W
+    if (colorVariance < 15) score += 5;
+  } else if (colorVariance > 80) {
+    score += 15;
+  } else if (colorVariance > 40) {
+    score += 8;
+  } else if (colorVariance < 15 && !isMangaContent) {
+    score -= 10;
+  }
 
   let grade, qualityAdjust;
   if (score >= 90) { grade = 'S'; qualityAdjust = -15; }
