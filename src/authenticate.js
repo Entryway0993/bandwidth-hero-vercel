@@ -7,6 +7,12 @@ const ALLOW_QUERY_API_KEY = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ALLOW_QUERY_API_KEY || 'true').trim().toLowerCase()
 );
 
+if (ALLOW_QUERY_API_KEY && API_KEY) {
+  console.warn(
+    '[AUTH WARNING] ALLOW_QUERY_API_KEY is enabled. Query-string API keys can leak into proxy logs, browser history, and referrers. Prefer x-api-key header auth.'
+  );
+}
+
 // F6: In-memory auth failure throttle
 const AUTH_FAILURES = new Map();
 const AUTH_FAILURE_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60000;
