@@ -985,11 +985,30 @@ let eventLoopLag;
     let allowPhotoFilters = allowEnhancements && !isMangaMode && !isStripMode;
 
     // Dimension overlord
-   if (ENABLE_DIMENSION_OVERLORD) {
+   if (signal.aborted) {
+      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
+      res.status(499);
+      return Buffer.alloc(0);
+    }
+
+    const frames = metadata.pages || 1;
+    const width = metadata.width || 0;
+    const height = metadata.height || 0;
+    totalPixelCost = width * height * frames;
+
+    const formatDecision = chooseOutputFormat(metadata, totalPixelCost);
+    const outputFormat = formatDecision.format;
+
+    let logUrl = 'unknown';
+    try {
+      const u = new URL(req.opts?.url);
+      logUrl = u.origin + u.pathname;
+    } catch {}
+
+    // Dimension overlord
+    if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
       const MAX_ASPECT_RATIO = 200;
-      const width = metadata.width || 0;
-      const height = metadata.height || 0;
 
       // 1. Check Dimensions
       if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
@@ -1026,49 +1045,6 @@ let eventLoopLag;
         res.setHeader('X-Dimension-Overlord', 'RESIZED_ASPECT');
       }
     }
-
-      const minDim = Math.max(1, Math.min(width, height));
-      const maxDim = Math.max(width, height);
-      const aspectRatio = maxDim / minDim;
-
-      if (aspectRatio > MAX_ASPECT_RATIO) {
-        console.log(JSON.stringify({
-          event: 'DIMENSION_OVERLORD_REJECT',
-          reqId,
-          url: logUrl,
-          mode,
-          width,
-          height,
-          aspectRatio: Number(aspectRatio.toFixed(2)),
-          reason: 'REJECTED_ASPECT',
-          maxAspectRatio: MAX_ASPECT_RATIO
-        }));
-
-        res.status(413);
-        res.setHeader('X-Dimension-Overlord', 'REJECTED_ASPECT');
-        return Buffer.alloc(0);
-      }
-    }
-
-    if (signal.aborted) {
-      res.setHeader('X-Timeout-Guillotine', 'ABORTED');
-      res.status(499);
-      return Buffer.alloc(0);
-    }
-
-    const frames = metadata.pages || 1;
-    const width = metadata.width || 0;
-    const height = metadata.height || 0;
-    totalPixelCost = width * height * frames;
-
-    const formatDecision = chooseOutputFormat(metadata, totalPixelCost);
-    const outputFormat = formatDecision.format;
-
-    let logUrl = 'unknown';
-    try {
-      const u = new URL(req.opts?.url);
-      logUrl = u.origin + u.pathname;
-    } catch {}
 
     res.setHeader('X-Format-Reason', formatDecision.reason);
 
