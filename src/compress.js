@@ -1852,7 +1852,7 @@ eventLoopLag = await measureEventLoopLag();
         memGov.releasePixels(totalPixelCost);
       }
     }
-} catch (err) {
+  } catch (err) {
     if (clientDisconnected || signal.aborted) {
       console.error(`[CLIENT_DISCONNECT] [${reqId}] Client aborted connection. Encode time: ${Date.now() - startedAt}ms, Pixel Cost: ${totalPixelCost}`);
       res.setHeader('X-Timeout-Guillotine', 'ABORTED');
@@ -1886,4 +1886,4 @@ eventLoopLag = await measureEventLoopLag();
       eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
     });
   }
-  }
+}
