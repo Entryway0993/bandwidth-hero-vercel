@@ -887,13 +887,10 @@ function chooseOutputFormat(metadata, totalPixelCost) {
   const height = metadata.height || 0;
 
   if (width <= 0 || height <= 0) {
-    return { format: 'jpeg', reason: 'unknown_dimensions' };
+    return { format: 'avif', reason: 'unknown_dimensions_force_avif' };
   }
 
-  if (height > 16383 || width > 16383) {
-    return { format: 'jpeg', reason: 'exceeds_webp_and_safe_limits' };
-  }
-
+  // Always AVIF. Resize handles oversized images.
   if (totalPixelCost <= AVIF_MAX_PIXELS) {
     return { format: 'avif', reason: 'avif_allowed' };
   }
@@ -988,28 +985,47 @@ let eventLoopLag;
     let allowPhotoFilters = allowEnhancements && !isMangaMode && !isStripMode;
 
     // Dimension overlord
-    if (ENABLE_DIMENSION_OVERLORD) {
+   if (ENABLE_DIMENSION_OVERLORD) {
       const MAX_DIMENSION = 16383;
       const MAX_ASPECT_RATIO = 200;
       const width = metadata.width || 0;
       const height = metadata.height || 0;
 
+      // 1. Check Dimensions
       if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
         console.log(JSON.stringify({
-          event: 'DIMENSION_OVERLORD_REJECT',
+          event: 'DIMENSION_OVERLORD_RESIZE',
           reqId,
           url: logUrl,
           mode,
           width,
           height,
-          reason: 'REJECTED_DIMENSION',
+          reason: 'RESIZED_DIMENSION',
           maxDimension: MAX_DIMENSION
         }));
-
-        res.status(413);
-        res.setHeader('X-Dimension-Overlord', 'REJECTED_DIMENSION');
-        return Buffer.alloc(0);
+        res.setHeader('X-Dimension-Overlord', 'RESIZED_DIMENSION');
       }
+
+      // 2. Check Aspect Ratio
+      const minDim = Math.max(1, Math.min(width, height));
+      const maxDim = Math.max(width, height);
+      const aspectRatio = maxDim / minDim;
+
+      if (aspectRatio > MAX_ASPECT_RATIO) {
+        console.log(JSON.stringify({
+          event: 'DIMENSION_OVERLORD_RESIZE',
+          reqId,
+          url: logUrl,
+          mode,
+          width,
+          height,
+          aspectRatio: Number(aspectRatio.toFixed(2)),
+          reason: 'RESIZED_ASPECT',
+          maxAspectRatio: MAX_ASPECT_RATIO
+        }));
+        res.setHeader('X-Dimension-Overlord', 'RESIZED_ASPECT');
+      }
+    }
 
       const minDim = Math.max(1, Math.min(width, height));
       const maxDim = Math.max(width, height);
@@ -1457,11 +1473,36 @@ eventLoopLag = await measureEventLoopLag();
         res.setHeader('X-Orientation', outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square');
       }
 
-      if (outputFormat === 'avif' && totalPixelCost > AVIF_MAX_PIXELS) {
-        const scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
-        targetWidth = Math.round(origW * scaleFactor);
-        targetHeight = Math.round(origH * scaleFactor);
-        res.setHeader('X-AVIF-Resize-To-Fit', 'true');
+      // Forced AVIF resize: handle both pixel cost and dimension limits.
+      if (outputFormat === 'avif') {
+        const AVIF_MAX_DIMENSION = 16383;
+        let scaleFactor = 1;
+        let resizeReason = '';
+
+        // Pixel cost resize.
+        if (totalPixelCost > AVIF_MAX_PIXELS) {
+          scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
+          resizeReason = 'PIXEL_COST';
+        }
+
+        // Dimension limit resize.
+        if (origW > AVIF_MAX_DIMENSION || origH > AVIF_MAX_DIMENSION) {
+          const dimScale = Math.min(
+            AVIF_MAX_DIMENSION / origW,
+            AVIF_MAX_DIMENSION / origH
+          );
+
+          if (dimScale < scaleFactor) {
+            scaleFactor = dimScale;
+            resizeReason = 'DIMENSION';
+          }
+        }
+
+        if (scaleFactor < 1) {
+          targetWidth = Math.round(origW * scaleFactor);
+          targetHeight = Math.round(origH * scaleFactor);
+          res.setHeader('X-AVIF-Resize-To-Fit', resizeReason);
+        }
       }
 
       if (targetWidth || targetHeight) {
