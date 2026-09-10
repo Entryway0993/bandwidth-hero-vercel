@@ -995,6 +995,17 @@ let eventLoopLag;
       const height = metadata.height || 0;
 
       if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        console.log(JSON.stringify({
+          event: 'DIMENSION_OVERLORD_REJECT',
+          reqId,
+          url: logUrl,
+          mode,
+          width,
+          height,
+          reason: 'REJECTED_DIMENSION',
+          maxDimension: MAX_DIMENSION
+        }));
+
         res.status(413);
         res.setHeader('X-Dimension-Overlord', 'REJECTED_DIMENSION');
         return Buffer.alloc(0);
@@ -1002,7 +1013,21 @@ let eventLoopLag;
 
       const minDim = Math.max(1, Math.min(width, height));
       const maxDim = Math.max(width, height);
-      if (maxDim / minDim > MAX_ASPECT_RATIO) {
+      const aspectRatio = maxDim / minDim;
+
+      if (aspectRatio > MAX_ASPECT_RATIO) {
+        console.log(JSON.stringify({
+          event: 'DIMENSION_OVERLORD_REJECT',
+          reqId,
+          url: logUrl,
+          mode,
+          width,
+          height,
+          aspectRatio: Number(aspectRatio.toFixed(2)),
+          reason: 'REJECTED_ASPECT',
+          maxAspectRatio: MAX_ASPECT_RATIO
+        }));
+
         res.status(413);
         res.setHeader('X-Dimension-Overlord', 'REJECTED_ASPECT');
         return Buffer.alloc(0);
