@@ -1343,7 +1343,7 @@ eventLoopLag = await measureEventLoopLag();
           pipeline = pipeline.gamma(1.4);
           res.setHeader('X-Luminance-Fix', 'UNDEREXPOSED');
           recordMetric('luminanceFix');
-        } else if (analysis.meanLuminance > 210 && analysis.stdevLuminance < 50) {
+        } else if (isPhotoMode && analysis.meanLuminance > 210 && analysis.stdevLuminance < 50) {
           pipeline = pipeline.linear(0.7, 0);
           res.setHeader('X-Luminance-Fix', 'OVEREXPOSED');
           res.setHeader('X-Luminance-Method', 'LINEAR_DARKEN');
