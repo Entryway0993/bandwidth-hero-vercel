@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import rateLimiter from './rateLimiter.js';
 
 const { LOGIN, PASSWORD, API_KEY, VERCEL_SERVICE_KEY } = process.env;
 
@@ -13,46 +14,39 @@ if (ALLOW_QUERY_API_KEY && API_KEY) {
   );
 }
 
-// F6: In-memory auth failure throttle
-const AUTH_FAILURES = new Map();
 const AUTH_FAILURE_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60000;
 const AUTH_FAILURE_MAX = parseInt(process.env.RATE_LIMIT_MAX_AUTH_FAILURES, 10) || 10;
+const AUTH_RATE_LIMIT_SCOPE = 'auth-fail';
 
-function recordAuthFailure(key) {
-  const now = Date.now();
-  const entry = AUTH_FAILURES.get(key) || { count: 0, windowStart: now };
-
-  if (now - entry.windowStart > AUTH_FAILURE_WINDOW_MS) {
-    entry.count = 0;
-    entry.windowStart = now;
-  }
-
-  entry.count++;
-  AUTH_FAILURES.set(key, entry);
-
-  if (AUTH_FAILURES.size > 1000) {
-    const oldest = AUTH_FAILURES.keys().next().value;
-    if (oldest !== undefined) AUTH_FAILURES.delete(oldest);
-  }
-
-  return entry.count;
+async function recordAuthFailure(key) {
+  await rateLimiter.increment({
+    scope: AUTH_RATE_LIMIT_SCOPE,
+    key,
+    windowMs: AUTH_FAILURE_WINDOW_MS,
+    max: AUTH_FAILURE_MAX
+  }).catch(() => {});
 }
 
-function isAuthRateLimited(key) {
-  const entry = AUTH_FAILURES.get(key);
-  if (!entry) return false;
+async function isAuthRateLimited(key) {
+  try {
+    const state = await rateLimiter.peek({
+      scope: AUTH_RATE_LIMIT_SCOPE,
+      key,
+      windowMs: AUTH_FAILURE_WINDOW_MS
+    });
 
-  const now = Date.now();
-  if (now - entry.windowStart > AUTH_FAILURE_WINDOW_MS) {
-    AUTH_FAILURES.delete(key);
+    return state.count >= AUTH_FAILURE_MAX;
+  } catch {
     return false;
   }
-
-  return entry.count >= AUTH_FAILURE_MAX;
 }
 
-function clearAuthFailure(key) {
-  AUTH_FAILURES.delete(key);
+async function clearAuthFailure(key) {
+  await rateLimiter.reset({
+    scope: AUTH_RATE_LIMIT_SCOPE,
+    key,
+    windowMs: AUTH_FAILURE_WINDOW_MS
+  }).catch(() => {});
 }
 
 function parseBasicAuth(req) {
@@ -83,7 +77,7 @@ function safeCompare(a, b) {
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
-export default function authenticate(req, res, next) {
+export default async function authenticate(req, res, next) {
   if (!LOGIN && !PASSWORD && !API_KEY && !VERCEL_SERVICE_KEY) {
     console.error('🚨 CRITICAL: No authentication configured. Refusing to serve.');
     return res.status(500).json({
@@ -100,21 +94,21 @@ export default function authenticate(req, res, next) {
   const clientKey = `ip:${clientIp}`;
 
   // F6: Rate limit auth failures
-  if (isAuthRateLimited(clientKey)) {
+  if (await isAuthRateLimited(clientKey)) {
     return res.status(429).json({ error: 'Too many authentication failures. Try again later.' });
   }
 
   // 0. Check Internal Service Key (from Cloudflare Worker - F10 FIX)
   const serviceKey = req.headers['x-vercel-service-key'];
   if (VERCEL_SERVICE_KEY && serviceKey && safeCompare(serviceKey, VERCEL_SERVICE_KEY)) {
-    clearAuthFailure(clientKey);
+    await clearAuthFailure(clientKey);
     return next();
   }
 
   // 1. Check Header API Key (preferred)
   const headerKey = req.headers['x-api-key'];
   if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
-    clearAuthFailure(clientKey);
+    await clearAuthFailure(clientKey);
     return next();
   }
 
@@ -127,7 +121,7 @@ export default function authenticate(req, res, next) {
     }
 
     if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
-      clearAuthFailure(clientKey);
+      await clearAuthFailure(clientKey);
       return next();
     }
   }
@@ -140,13 +134,13 @@ export default function authenticate(req, res, next) {
       safeCompare(credentials.name, LOGIN) &&
       safeCompare(credentials.pass, PASSWORD)
     ) {
-      clearAuthFailure(clientKey);
+      await clearAuthFailure(clientKey);
       return next();
     }
   }
 
   // 4. Deny access
-  recordAuthFailure(clientKey);
+  await recordAuthFailure(clientKey);
 
   if (LOGIN && PASSWORD) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Bandwidth-Hero Compression Service"');
