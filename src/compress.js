@@ -1197,7 +1197,7 @@ eventLoopLag = await measureEventLoopLag();
 
       // Deskew
       let skewAngle = 0;
-      if (ENABLE_DESKEW && allowEnhancements && !isStripMode && !analysis.isMangaStrip && !analysis.isMangaPage && !analysis.isMangaWidePage) {
+      if (ENABLE_DESKEW && allowEnhancements && !isMangaMode && !isStripMode && !analysis.isMangaStrip && !analysis.isMangaPage && !analysis.isMangaWidePage) {
         skewAngle = await detectSkew(buffer);
         if (skewAngle !== 0) {
           res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
@@ -1379,14 +1379,14 @@ eventLoopLag = await measureEventLoopLag();
       }
 
       // Deskew rotation
-      if (ENABLE_DESKEW && allowEnhancements && skewAngle !== 0) {
+      if (ENABLE_DESKEW && allowEnhancements && !isMangaMode && skewAngle !== 0) {
         pipeline = pipeline.rotate(skewAngle, {
           background: analysis.isGrayscale
             ? { r: 255, g: 255, b: 255 }
             : { r: 255, g: 255, b: 255, alpha: 0 },
         });
       }
-
+      
       // FEATURE: Smart Alpha Channel Trimming - apply extract
       if (alphaBounds) {
         pipeline = pipeline.extract({
