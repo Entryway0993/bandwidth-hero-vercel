@@ -743,7 +743,25 @@ if (!detectedType.startsWith('image/')) return sendGhost(res, 3600, { body: rawB
       return bypass(req, res, rawBody, statusCode);
     }
 
-    if (shouldCompress(req, rawBody, memoryGovernor)) {
+    const compressEligible = shouldCompress(req, rawBody, memoryGovernor);
+
+    if (!compressEligible) {
+      const { originType } = req.opts || {};
+      const isImageType = originType && originType.startsWith('image/');
+      const isExcludedType = ['image/svg+xml', 'application/pdf', 'image/x-icon', 'image/vnd.microsoft.icon'].includes(originType);
+
+      // Force-AVIF: if it's a valid image but rejected due to memory budget, return 503
+      if (isImageType && !isExcludedType) {
+        res.setHeader('Retry-After', '5');
+        res.setHeader('X-Force-AVIF', 'MEMORY_BUDGET_EXCEEDED');
+        return res.status(503).json({ error: 'Memory budget exceeded. Try again shortly.' });
+      }
+
+      // Non-image or excluded type: bypass
+      return bypass(req, res, rawBody, statusCode);
+    }
+
+    if (compressEligible) {
       let compressedResult = null;
       let compressError = null;
 
