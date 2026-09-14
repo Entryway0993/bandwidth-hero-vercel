@@ -193,9 +193,12 @@ function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+const EXACT_CACHE_MAX_ENTRIES = safeInt(process.env.EXACT_CACHE_MAX_ENTRIES, 100);
+const EXACT_CACHE_MAX_MB = safeInt(process.env.EXACT_CACHE_MAX_MB, 128);
+
 const exactCache = new LRUCache({
-  max: 20,
-  maxSize: 20 * 1024 * 1024,
+  max: EXACT_CACHE_MAX_ENTRIES,
+  maxSize: EXACT_CACHE_MAX_MB * 1024 * 1024,
   sizeCalculation: (entry) => entry.buffer.length
 });
 
