@@ -1032,17 +1032,17 @@ let eventLoopLag;
 
       if (aspectRatio > MAX_ASPECT_RATIO) {
         console.log(JSON.stringify({
-          event: 'DIMENSION_OVERLORD_RESIZE',
+          event: 'DIMENSION_OVERLORD_ASPECT',
           reqId,
           url: logUrl,
           mode,
           width,
           height,
           aspectRatio: Number(aspectRatio.toFixed(2)),
-          reason: 'RESIZED_ASPECT',
+          reason: 'ASPECT_EXCEEDED',
           maxAspectRatio: MAX_ASPECT_RATIO
         }));
-        res.setHeader('X-Dimension-Overlord', 'RESIZED_ASPECT');
+        res.setHeader('X-Dimension-Overlord', 'ASPECT_EXCEEDED');
       }
     }
 
@@ -1449,9 +1449,10 @@ eventLoopLag = await measureEventLoopLag();
         res.setHeader('X-Orientation', outW > outH ? 'landscape' : outH > outW ? 'portrait' : 'square');
       }
 
-      // Forced AVIF resize: handle both pixel cost and dimension limits.
+      // Forced AVIF resize: handle pixel cost, dimension limits, and aspect ratio.
       if (outputFormat === 'avif') {
         const AVIF_MAX_DIMENSION = 16383;
+        const AVIF_MAX_ASPECT_RATIO = 200;
         let scaleFactor = 1;
         let resizeReason = '';
 
@@ -1460,6 +1461,34 @@ eventLoopLag = await measureEventLoopLag();
           scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
           resizeReason = 'PIXEL_COST';
         }
+
+        // Dimension limit resize.
+        if (origW > AVIF_MAX_DIMENSION || origH > AVIF_MAX_DIMENSION) {
+          const dimScale = Math.min(
+            AVIF_MAX_DIMENSION / origW,
+            AVIF_MAX_DIMENSION / origH
+          );
+
+          if (dimScale < scaleFactor) {
+            scaleFactor = dimScale;
+            resizeReason = 'DIMENSION';
+          }
+        }
+
+        // Aspect ratio passthrough: extreme ratios cannot be fixed without cropping.
+        // We preserve content and let the encoder handle it after dimension/pixel resize.
+        const currentAspectRatio = Math.max(origW / Math.max(origH, 1), origH / Math.max(origW, 1));
+        if (currentAspectRatio > AVIF_MAX_ASPECT_RATIO) {
+          res.setHeader('X-AVIF-Aspect-Passthrough', `RATIO_${Number(currentAspectRatio.toFixed(1))}`);
+          // No cropping. Dimension and pixel resizes above already ensure encodability.
+        }
+
+        if (scaleFactor < 1) {
+          targetWidth = Math.round(origW * scaleFactor);
+          targetHeight = Math.round(origH * scaleFactor);
+          res.setHeader('X-AVIF-Resize-To-Fit', resizeReason);
+        }
+      }
 
         // Dimension limit resize.
         if (origW > AVIF_MAX_DIMENSION || origH > AVIF_MAX_DIMENSION) {
