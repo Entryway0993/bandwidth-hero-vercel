@@ -1506,13 +1506,6 @@ eventLoopLag = await measureEventLoopLag();
           }
         }
 
-        if (scaleFactor < 1) {
-          targetWidth = Math.round(origW * scaleFactor);
-          targetHeight = Math.round(origH * scaleFactor);
-          res.setHeader('X-AVIF-Resize-To-Fit', resizeReason);
-        }
-      }
-
       if (targetWidth || targetHeight) {
         pipeline = pipeline.resize(targetWidth, targetHeight, {
           fit: 'inside',
