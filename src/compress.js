@@ -40,6 +40,8 @@ const SHUTDOWN_TIMEOUT = safeInt(process.env.SHUTDOWN_TIMEOUT, 10000);
 const SHARP_HARD_TIMEOUT_MS = safeInt(process.env.SHARP_HARD_TIMEOUT_MS, 60000);
 
 const AVIF_MAX_PIXELS = safeInt(process.env.AVIF_MAX_PIXELS, 50_000_000);
+const AVIF_MAX_DIMENSION = 16383;
+const AVIF_MAX_ASPECT_RATIO = 200;
 
 const ANALYSIS_MAX_DIM = safeInt(process.env.ANALYSIS_MAX_DIM, 4096);
 const ANALYSIS_MAX_PIXELS = safeInt(process.env.ANALYSIS_MAX_PIXELS, 16_000_000);
@@ -1454,8 +1456,6 @@ eventLoopLag = await measureEventLoopLag();
 
       // Forced AVIF resize: handle pixel cost, dimension limits, and aspect ratio.
       if (outputFormat === 'avif') {
-        const AVIF_MAX_DIMENSION = 16383;
-        const AVIF_MAX_ASPECT_RATIO = 200;
         let scaleFactor = 1;
         let resizeReason = '';
 
