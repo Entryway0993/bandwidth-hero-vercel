@@ -542,18 +542,11 @@ export default async function proxy(req, res) {
 
   const { 'user-agent': userAgent } = req.headers;
 
-  const queryReferer = Array.isArray(req.query?.referer)
-    ? req.query.referer[0]
-    : req.query?.referer;
-
   let autoReferer = '';
   try {
     const parsedTarget = new URL(targetUrl);
     autoReferer = parsedTarget.origin;
   } catch {}
-
-  const finalReferer = (queryReferer && typeof queryReferer === 'string')
-    ? queryReferer : autoReferer;
 
   const headers = {
     'user-agent': userAgent || getRandomUA(),
@@ -566,7 +559,7 @@ export default async function proxy(req, res) {
     'sec-ch-ua': '"Chromium";v="148", "Not;A=Brand";v="24", "Google Chrome";v="148"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
-    ...(finalReferer ? { referer: finalReferer } : {})
+    ...(autoReferer ? { referer: autoReferer } : {})
   };
 
   const cacheKey = redactUrlForCache(targetUrl);
