@@ -8,7 +8,8 @@
 import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
-import morgan from 'morgan';
+import pino from 'pino';
+import pinoHttp from 'pino-http';
 import crypto from 'node:crypto';
 import { brotliCompress } from 'node:zlib';
 import { promisify } from 'node:util';
