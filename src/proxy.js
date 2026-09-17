@@ -512,6 +512,7 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
 export default async function proxy(req, res) {
   const startTime = Date.now();
   const reqId = req.id || 'unknown';
+  const log = req.log || console;
 
   if (memoryGovernor.isUnderPressure()) {
     res.setHeader('Retry-After', '10');
@@ -779,7 +780,7 @@ if (!detectedType.startsWith('image/')) return sendGhost(res, 3600, { body: rawB
       // FEATURE: Corrupted Image Auto-Retry
       if (compressError && ENABLE_CORRUPT_RETRY && isSharpDecodeError(compressError)) {
         res.setHeader('X-Corrupt-Retry', 'TRIGGERED');
-        console.error(`[CORRUPT RETRY] [${reqId}] Decode failure detected, retrying with new UA`);
+        log.warn({ reqId }, '[CORRUPT RETRY] Decode failure detected, retrying with new UA');
 
         let retrySuccess = false;
 
@@ -832,7 +833,7 @@ if (!detectedType.startsWith('image/')) return sendGhost(res, 3600, { body: rawB
         }
 
         if (!retrySuccess && !compressedResult) {
-          console.error(`[CORRUPT RETRY] [${reqId}] All retry attempts exhausted`);
+          log.error({ reqId }, '[CORRUPT RETRY] All retry attempts exhausted');
 return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
         }
       } else if (compressError) {
@@ -877,7 +878,7 @@ return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
       return sendGhost(res, 60);
     }
 
-    console.error(`[PROXY ERROR] [${reqId}]`, sanitizeError(error));
+    log.error({ reqId, error: sanitizeError(error) }, '[PROXY ERROR]');
     return sendGhost(res, 60);
   }
 }
