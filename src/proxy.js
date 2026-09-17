@@ -653,17 +653,6 @@ export default async function proxy(req, res) {
     const upstreamMaxAgeMatch = upstreamCacheControl.match(/max-age=(\d+)/i);
     const upstreamMaxAge = upstreamMaxAgeMatch ? parseInt(upstreamMaxAgeMatch[1], 10) : null;
 
-    if (req.query?.debug === '1') {
-      const preview = rawBody.slice(0, 512).toString('utf8', 0, 512).replace(/[^\x20-\x7E]/g, '');
-      return res.status(200).json({
-        status: statusCode,
-        detectedType: detectContentType(rawBody),
-        sizeBytes: rawBody.length,
-        preview,
-        requestId: reqId
-      });
-    }
-
     if (statusCode === 404 || statusCode === 410) return sendGhost(res, 86400, { body: rawBody, accept: req.headers.accept });
 if (statusCode === 403) return sendGhost(res, 3600, { body: rawBody, accept: req.headers.accept });
 if (statusCode !== 304 && (statusCode < 200 || statusCode >= 300)) return sendGhost(res, 60, { body: rawBody, accept: req.headers.accept });
