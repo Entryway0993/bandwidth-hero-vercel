@@ -1285,25 +1285,12 @@ eventLoopLag = await measureEventLoopLag();
         quality = Math.min(95, quality + TEXT_QUALITY_BOOST);
         res.setHeader('X-Text-Quality-Boost', `+${TEXT_QUALITY_BOOST}`);
       }
-
-      // FEATURE: Animated Frame Dropping
+      
       const frameCount = metadata.pages || 1;
-      let effectiveFrameCount = frameCount;
-      let frameDropActive = false;
-
-      if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
+   if (isAnimated && frameCount > MAX_ANIMATION_FRAMES) {
         res.setHeader('X-Frame-Cap', 'TRUNCATED');
         if (ENABLE_ORACLE_LEDGER) metrics.totalBytesOut += buffer.length;
         return buffer;
-      }
-
-      if (ENABLE_FRAME_DROPPING && isAnimated && frameCount > FRAME_DROP_THRESHOLD) {
-        frameDropActive = true;
-        effectiveFrameCount = Math.ceil(frameCount / 2);
-        res.setHeader('X-Frame-Drop', `${frameCount}->${effectiveFrameCount}`);
-        // Reduce quality further for dropped-frame animations to compensate
-        quality = Math.max(10, quality - 10);
-        if (ENABLE_ORACLE_LEDGER) metrics.frameDrops++;
       }
 
       // Banding exorcist check
@@ -1323,9 +1310,9 @@ eventLoopLag = await measureEventLoopLag();
 
       // Build Sharp pipeline
       let pipeline = sharp(buffer, {
-        animated: isAnimated && !frameDropActive,
-        limitInputPixels: 0
-      });
+     animated: isAnimated,
+     limitInputPixels: 0
+   });
 
       // FEATURE: Safe Metadata Exceptions
       if (ENABLE_SAFE_METADATA && ENABLE_METADATA_REAPER) {
