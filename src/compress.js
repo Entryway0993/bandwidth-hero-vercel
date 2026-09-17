@@ -1006,10 +1006,10 @@ let eventLoopLag;
     const outputFormat = formatDecision.format;
 
     let logUrl = 'unknown';
-    try {
-      const u = new URL(req.opts?.url);
-      logUrl = u.origin + u.pathname;
-    } catch {}
+ try {
+   const u = new URL(req.opts?.url);
+   logUrl = u.origin + '/*';
+ } catch {}
 
     // Dimension overlord
     if (ENABLE_DIMENSION_OVERLORD) {
