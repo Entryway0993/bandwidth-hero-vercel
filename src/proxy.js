@@ -434,6 +434,7 @@ async function consumeWithLimit(body) {
 
 async function safeRequest(url, headers, signal, maxRedirects = 5) {
   let currentUrl = url;
+  let requestHeaders = headers;
   const deadline = Date.now() + UPSTREAM_DEADLINE_MS;
 
   for (let i = 0; i <= maxRedirects; i++) {
@@ -446,7 +447,7 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
     const { statusCode, headers: resHeaders, body } = await request(currentUrl, {
       dispatcher: chromeDispatcher,
       method: 'GET',
-      headers,
+      headers: requestHeaders,
       signal,
       maxRedirections: 0
     });
@@ -475,6 +476,12 @@ async function safeRequest(url, headers, signal, maxRedirects = 5) {
       }
 
       currentUrl = nextUrl;
+
+      if (requestHeaders && 'x-internal-key' in requestHeaders) {
+        requestHeaders = { ...requestHeaders };
+        delete requestHeaders['x-internal-key'];
+      }
+
       continue;
     }
 
