@@ -1455,64 +1455,50 @@ eventLoopLag = await measureEventLoopLag();
       }
 
       // Forced AVIF resize: handle pixel cost, dimension limits, and aspect ratio.
-      if (outputFormat === 'avif') {
-        let scaleFactor = 1;
-        let resizeReason = '';
+   if (outputFormat === 'avif') {
+     let scaleFactor = 1;
+     let resizeReason = '';
 
-        // Pixel cost resize.
-        if (totalPixelCost > AVIF_MAX_PIXELS) {
-          scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
-          resizeReason = 'PIXEL_COST';
-        }
+     // Pixel cost resize.
+     if (totalPixelCost > AVIF_MAX_PIXELS) {
+       scaleFactor = Math.sqrt(AVIF_MAX_PIXELS / totalPixelCost);
+       resizeReason = 'PIXEL_COST';
+     }
 
-        // Dimension limit resize.
-        if (origW > AVIF_MAX_DIMENSION || origH > AVIF_MAX_DIMENSION) {
-          const dimScale = Math.min(
-            AVIF_MAX_DIMENSION / origW,
-            AVIF_MAX_DIMENSION / origH
-          );
+     // Dimension limit resize.
+     if (origW > AVIF_MAX_DIMENSION || origH > AVIF_MAX_DIMENSION) {
+       const dimScale = Math.min(
+         AVIF_MAX_DIMENSION / origW,
+         AVIF_MAX_DIMENSION / origH
+       );
+       if (dimScale < scaleFactor) {
+         scaleFactor = dimScale;
+         resizeReason = 'DIMENSION';
+       }
+     }
 
-          if (dimScale < scaleFactor) {
-            scaleFactor = dimScale;
-            resizeReason = 'DIMENSION';
-          }
-        }
+     // Aspect ratio passthrough: extreme ratios cannot be fixed without cropping.
+     // We preserve content and let the encoder handle it after dimension/pixel resize.
+     const currentAspectRatio = Math.max(origW / Math.max(origH, 1), origH / Math.max(origW, 1));
+     if (currentAspectRatio > AVIF_MAX_ASPECT_RATIO) {
+       res.setHeader('X-AVIF-Aspect-Passthrough', `RATIO_${Number(currentAspectRatio.toFixed(1))}`);
+       // No cropping. Dimension and pixel resizes above already ensure encodability.
+     }
 
-        // Aspect ratio passthrough: extreme ratios cannot be fixed without cropping.
-        // We preserve content and let the encoder handle it after dimension/pixel resize.
-        const currentAspectRatio = Math.max(origW / Math.max(origH, 1), origH / Math.max(origW, 1));
-        if (currentAspectRatio > AVIF_MAX_ASPECT_RATIO) {
-          res.setHeader('X-AVIF-Aspect-Passthrough', `RATIO_${Number(currentAspectRatio.toFixed(1))}`);
-          // No cropping. Dimension and pixel resizes above already ensure encodability.
-        }
+     if (scaleFactor < 1) {
+       targetWidth = Math.round(origW * scaleFactor);
+       targetHeight = Math.round(origH * scaleFactor);
+       res.setHeader('X-AVIF-Resize-To-Fit', resizeReason);
+     }
+   }
 
-        if (scaleFactor < 1) {
-          targetWidth = Math.round(origW * scaleFactor);
-          targetHeight = Math.round(origH * scaleFactor);
-          res.setHeader('X-AVIF-Resize-To-Fit', resizeReason);
-        }
-      }
-
-        // Dimension limit resize.
-        if (origW > AVIF_MAX_DIMENSION || origH > AVIF_MAX_DIMENSION) {
-          const dimScale = Math.min(
-            AVIF_MAX_DIMENSION / origW,
-            AVIF_MAX_DIMENSION / origH
-          );
-
-          if (dimScale < scaleFactor) {
-            scaleFactor = dimScale;
-            resizeReason = 'DIMENSION';
-          }
-        }
-
-      if (targetWidth || targetHeight) {
-        pipeline = pipeline.resize(targetWidth, targetHeight, {
-          fit: 'inside',
-          withoutEnlargement: true,
-          kernel: sharp.kernel.lanczos3,
-        });
-      }
+   if (targetWidth || targetHeight) {
+     pipeline = pipeline.resize(targetWidth, targetHeight, {
+       fit: 'inside',
+       withoutEnlargement: true,
+       kernel: sharp.kernel.lanczos3,
+     });
+   }
 
       // Sharpen - boosted for text images
       const contentWantsSharpen =
