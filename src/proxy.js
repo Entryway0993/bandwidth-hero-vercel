@@ -265,6 +265,21 @@ function sanitizeUrl(url) {
   }
 }
 
+function redactUrlForCache(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    const sensitiveParams = ['token', 'access_token', 'sig', 'signature', 'session', 'auth', 'secret', 'key', 'password', 'api', 'apikey', 'api_key'];
+    for (const param of sensitiveParams) {
+      if (u.searchParams.has(param)) {
+        u.searchParams.set(param, '[REDACTED]');
+      }
+    }
+    return u.href;
+  } catch {
+    return urlStr;
+  }
+}
+
 function sanitizeError(err) {
   let msg = err?.message ? String(err.message) : 'Unknown error';
   msg = msg.replace(/\?[^\s]*/g, '');
@@ -554,7 +569,8 @@ export default async function proxy(req, res) {
     ...(finalReferer ? { referer: finalReferer } : {})
   };
 
-  const vaultEntry = vaultGet(targetUrl);
+  const cacheKey = redactUrlForCache(targetUrl);
+  const vaultEntry = vaultGet(cacheKey);
   if (vaultEntry) {
     if (vaultEntry.etag) headers['if-none-match'] = vaultEntry.etag;
     if (vaultEntry.lastModified) headers['if-modified-since'] = vaultEntry.lastModified;
@@ -651,7 +667,7 @@ export default async function proxy(req, res) {
       const upstreamEtag = responseHeaders['etag'] || null;
       const upstreamLastModified = responseHeaders['last-modified'] || null;
       if (upstreamEtag || upstreamLastModified) {
-        vaultSet(targetUrl, rawBody, upstreamEtag, upstreamLastModified);
+        vaultSet(cacheKey, rawBody, upstreamEtag, upstreamLastModified);
       }
     }
 
