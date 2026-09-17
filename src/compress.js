@@ -964,6 +964,7 @@ export default async function compress(req, res, buffer, governor) {
   }
 
   let totalPixelCost = 0;
+let pixelsAdmitted = false;
 let finalEncodeTime = 0;
 let eventLoopLag;
 
@@ -1118,14 +1119,16 @@ let eventLoopLag;
     if (ENABLE_ORACLE_LEDGER) metrics.cacheMisses++;
 
     if (!memGov.admitPixels(totalPixelCost)) {
-      res.status(503);
-      res.setHeader('X-Memory-Governor', 'REJECTED');
-      res.setHeader('Retry-After', '5');
-      if (ENABLE_ORACLE_LEDGER) metrics.memoryRejections++;
-      return Buffer.alloc(0);
-    }
+  res.status(503);
+  res.setHeader('X-Memory-Governor', 'REJECTED');
+  res.setHeader('Retry-After', '5');
+  if (ENABLE_ORACLE_LEDGER) metrics.memoryRejections++;
+  return Buffer.alloc(0);
+}
 
-    res.setHeader('X-Memory-Governor', 'ADMITTED');
+pixelsAdmitted = true;
+
+res.setHeader('X-Memory-Governor', 'ADMITTED');
     res.setHeader('X-Pixel-Cost', String(totalPixelCost));
     
     // FEATURE: CPU/event-loop pressure governor
@@ -1835,10 +1838,11 @@ eventLoopLag = await measureEventLoopLag();
       return outputBuffer;
 
     } finally {
-      if (totalPixelCost > 0) {
-        memGov.releasePixels(totalPixelCost);
-      }
-    }
+  if (pixelsAdmitted) {
+    memGov.releasePixels(totalPixelCost);
+    pixelsAdmitted = false;
+  }
+}
   } catch (err) {
     if (clientDisconnected || signal.aborted) {
       console.error(`[CLIENT_DISCONNECT] [${reqId}] Client aborted connection. Encode time: ${Date.now() - startedAt}ms, Pixel Cost: ${totalPixelCost}`);
@@ -1863,14 +1867,19 @@ eventLoopLag = await measureEventLoopLag();
     }
     return null;
   } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    activeRequests--;
+  if (timeoutHandle) clearTimeout(timeoutHandle);
 
-    concurrencyGovernor.release({
-      success: !clientDisconnected && !signal.aborted,
-      timedOut: signal.aborted,
-      encodeTimeMs: finalEncodeTime,
-      eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
-    });
+  if (pixelsAdmitted) {
+    memGov.releasePixels(totalPixelCost);
+    pixelsAdmitted = false;
   }
+
+  activeRequests--;
+  concurrencyGovernor.release({
+    success: !clientDisconnected && !signal.aborted,
+    timedOut: signal.aborted,
+    encodeTimeMs: finalEncodeTime,
+    eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
+  });
+}
 }
