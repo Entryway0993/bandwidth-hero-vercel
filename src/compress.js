@@ -1067,12 +1067,17 @@ let eventLoopLag;
       avifMaxPixels: AVIF_MAX_PIXELS
     }));
     
-    const paramFingerprint = [
-      outputFormat, req.opts?.quality, req.opts?.grayscale,
-      req.opts?.maxDim, req.opts?.maxStripWidth, mode,
-      sharpenPreference === undefined ? '' : String(sharpenPreference),
-      req.opts?.rotate || 0
-    ].join('|');
+    const viewportCacheKey = req.opts?.maxDim > 0
+  ? 'md-fixed'
+  : `vp-${getViewportMaxDim(req)}`;
+
+const paramFingerprint = [
+  outputFormat, req.opts?.quality, req.opts?.grayscale,
+  req.opts?.maxDim, req.opts?.maxStripWidth, mode,
+  sharpenPreference === undefined ? '' : String(sharpenPreference),
+  req.opts?.rotate || 0,
+  viewportCacheKey
+].join('|');
 
     const exactHash = await generateExactHash(buffer);
     const exactKey = exactHash ? `${exactHash}:${paramFingerprint}` : null;
