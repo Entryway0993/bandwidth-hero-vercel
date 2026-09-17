@@ -21,7 +21,13 @@ const BLOCKED_SUFFIXES = [
   '.arpa',
   '.onion',
   '.i2p',
-  '.exit'
+  '.exit',
+  '.corp',
+  '.lan',
+  '.home',
+  '.intra',
+  '.intranet',
+  '.private'
 ];
 
 const BLOCKED_IPV4_RANGES = new Set([
