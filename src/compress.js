@@ -1778,9 +1778,8 @@ eventLoopLag = await measureEventLoopLag();
       });
       
       const concurrencyStatus = concurrencyGovernor.getStatus();
-
-      console.log(JSON.stringify({
-        event: 'COMPRESS',
+   log.info({
+     event: 'COMPRESS',
         reqId,
         activeRequests,
         activeEncodes,
@@ -1825,9 +1824,9 @@ eventLoopLag = await measureEventLoopLag();
         cpuPressure,
         cpuLagMs: Math.round(eventLoopLag * 100) / 100,
         cpuPressureDisabledEnhancements: cpuPressure,
-        enhancements: enhancementState,
-        appliedEnhancements
-      }));
+       enhancements: enhancementState,
+       appliedEnhancements
+     });
 
       res.setHeader('Content-Length', outputBuffer.length);
       return outputBuffer;
@@ -1840,13 +1839,17 @@ eventLoopLag = await measureEventLoopLag();
 }
   } catch (err) {
     if (clientDisconnected || signal.aborted) {
-      console.error(`[CLIENT_DISCONNECT] [${reqId}] Client aborted connection. Encode time: ${Date.now() - startedAt}ms, Pixel Cost: ${totalPixelCost}`);
+      log.warn({
+      reqId,
+      encodeTimeMs: Date.now() - startedAt,
+      pixelCost: totalPixelCost
+    }, '[CLIENT_DISCONNECT] Client aborted connection');
       res.setHeader('X-Timeout-Guillotine', 'ABORTED');
       return Buffer.alloc(0);
     }
 
     const safeMessage = err?.message ? String(err.message).split('?')[0] : 'Unknown compress error';
-    console.error(`[COMPRESS ERROR] [${reqId}]`, safeMessage);
+    log.error({ reqId, error: safeMessage }, '[COMPRESS ERROR]');
     res.setHeader('X-Compression', 'FAILED');
 
     if (ENABLE_ORACLE_LEDGER) {
