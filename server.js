@@ -43,7 +43,7 @@ app.use((req, res, next) => {
 // F5-MODIFIED / F15: Redact API keys in logs instead of skipping
 const redactFormat = morgan((tokens, req, res) => {
   let url = tokens.url(req, res) || '';
-  url = url.replace(/([?&])(api|apikey|api_key)=([^&]*)/gi, '$1$2=[REDACTED]');
+  url = url.replace(/([?&])(api|apikey|api_key|token|access_token|sig|signature|session|auth|secret|key|password)=([^&]*)/gi, '$1$2=[REDACTED]');
   return [
     tokens.method(req, res),
     url,
