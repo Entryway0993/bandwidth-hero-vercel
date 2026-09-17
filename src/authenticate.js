@@ -18,7 +18,34 @@ const AUTH_FAILURE_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) ||
 const AUTH_FAILURE_MAX = parseInt(process.env.RATE_LIMIT_MAX_AUTH_FAILURES, 10) || 10;
 const AUTH_RATE_LIMIT_SCOPE = 'auth-fail';
 
+const REQ_RATE_LIMIT_WINDOW_MS = parseInt(process.env.REQ_RATE_LIMIT_WINDOW_MS, 10) || 60000;
+const REQ_RATE_LIMIT_MAX = parseInt(process.env.REQ_RATE_LIMIT_MAX, 10) || 120;
+const REQ_RATE_LIMIT_SCOPE = 'req-success';
+
+async function recordSuccessfulRequest(key) {
+  await rateLimiter.increment({
+    scope: REQ_RATE_LIMIT_SCOPE,
+    key,
+    windowMs: REQ_RATE_LIMIT_WINDOW_MS,
+    max: REQ_RATE_LIMIT_MAX
+  }).catch(() => {});
+}
+
+async function isRequestRateLimited(key) {
+  try {
+    const state = await rateLimiter.peek({
+      scope: REQ_RATE_LIMIT_SCOPE,
+      key,
+      windowMs: REQ_RATE_LIMIT_WINDOW_MS
+    });
+    return state.count >= REQ_RATE_LIMIT_MAX;
+  } catch {
+    return false;
+  }
+}
+
 async function recordAuthFailure(key) {
+// ...
   await rateLimiter.increment({
     scope: AUTH_RATE_LIMIT_SCOPE,
     key,
@@ -98,10 +125,17 @@ export default async function authenticate(req, res, next) {
     return res.status(429).json({ error: 'Too many authentication failures. Try again later.' });
   }
 
+  // Item 9: Rate limit successful requests per IP
+  if (await isRequestRateLimited(clientKey)) {
+    res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
+    return res.status(429).json({ error: 'Too many requests. Try again later.' });
+  }
+
   // 0. Check Internal Service Key (from Cloudflare Worker - F10 FIX)
   const serviceKey = req.headers['x-vercel-service-key'];
   if (VERCEL_SERVICE_KEY && serviceKey && safeCompare(serviceKey, VERCEL_SERVICE_KEY)) {
     await clearAuthFailure(clientKey);
+    await recordSuccessfulRequest(clientKey);
     return next();
   }
 
