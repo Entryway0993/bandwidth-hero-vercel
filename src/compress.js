@@ -1879,5 +1879,5 @@ eventLoopLag = await measureEventLoopLag();
     encodeTimeMs: finalEncodeTime,
     eventLoopLag: typeof eventLoopLag === 'number' ? eventLoopLag : 0
   });
-}
+ }
 }
