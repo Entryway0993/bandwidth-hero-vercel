@@ -15,13 +15,14 @@
     "test": "node --test tests/"
   },
   "dependencies": {
-    "dotenv": "^17.2.2",
-    "express": "^5.2.1",
-    "helmet": "^8.1.0",
-    "ipaddr.js": "^2.2.0",
-    "lru-cache": "^11.0.2",
-    "morgan": "^1.10.1",
-    "sharp": "^0.35.3",
-    "undici": "^8.10.0"
-  }
+  "dotenv": "^17.2.2",
+  "express": "^5.2.1",
+  "helmet": "^8.1.0",
+  "ipaddr.js": "^2.2.0",
+  "lru-cache": "^11.0.2",
+  "pino": "^9.5.0",
+  "pino-http": "^10.3.0",
+  "sharp": "^0.35.3",
+  "undici": "^8.10.0"
+ }
 }
