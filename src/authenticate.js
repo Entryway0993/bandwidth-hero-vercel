@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
+import pino from 'pino';
 import rateLimiter from './rateLimiter.js';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info'
+});
 
 const { LOGIN, PASSWORD, API_KEY, VERCEL_SERVICE_KEY } = process.env;
 
@@ -9,7 +14,7 @@ const ALLOW_QUERY_API_KEY = ['1', 'true', 'yes', 'on'].includes(
 );
 
 if (ALLOW_QUERY_API_KEY && API_KEY) {
-  console.warn(
+  logger.warn(
     '[AUTH WARNING] ALLOW_QUERY_API_KEY is enabled. Query-string API keys can leak into proxy logs, browser history, and referrers. Prefer x-api-key header auth.'
   );
 }
@@ -106,11 +111,14 @@ function safeCompare(a, b) {
 
 export default async function authenticate(req, res, next) {
   if (!LOGIN && !PASSWORD && !API_KEY && !VERCEL_SERVICE_KEY) {
-    console.error('🚨 CRITICAL: No authentication configured. Refusing to serve.');
-    return res.status(500).json({
-      error: 'Server misconfigured: Authentication is required.'
-    });
-  }
+  const log = req.log || logger;
+
+  log.error('🚨 CRITICAL: No authentication configured. Refusing to serve.');
+
+  return res.status(500).json({
+    error: 'Server misconfigured: Authentication is required.'
+  });
+}
 
   // F5-MODIFIED: Prevent referer leakage of query keys
   res.setHeader('Referrer-Policy', 'no-referrer');
