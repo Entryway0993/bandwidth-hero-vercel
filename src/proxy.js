@@ -597,7 +597,7 @@ export default async function proxy(req, res) {
         statusCode = response.statusCode;
         responseHeaders = response.headers;
       } catch (fallbackErr) {
-        if (req.signal.aborted) return;
+        if (isClientAborted(req)) return;
         throw fallbackErr;
       }
     } else {
