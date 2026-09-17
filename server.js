@@ -41,22 +41,37 @@ app.use((req, res, next) => {
   next();
 });
 
-// F5-MODIFIED / F15: Redact API keys in logs instead of skipping
-const redactFormat = morgan((tokens, req, res) => {
-  let url = tokens.url(req, res) || '';
-  url = url.replace(/([?&])(api|apikey|api_key|token|access_token|sig|signature|session|auth|secret|key|password)=([^&]*)/gi, '$1$2=[REDACTED]');
-  return [
-    tokens.method(req, res),
-    url,
-    tokens.status(req, res),
-    tokens.res(req, res, 'content-length'),
-    '-',
-    tokens['response-time'](req, res),
-    'ms'
-  ].join(' ');
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  formatters: {
+    level: (label) => ({ level: label })
+  },
+  timestamp: pino.stdTimeFunctions.isoTime
 });
 
-app.use(redactFormat);
+app.use(
+  pinoHttp({
+    logger,
+    customProps: (req) => ({ reqId: req.id }),
+    serializers: {
+      req(req) {
+        let url = req.url || '';
+
+        url = url.replace(
+          /([?&])(api|apikey|api_key|token|access_token|sig|signature|session|auth|secret|key|password)=([^&]*)/gi,
+          '$1$2=[REDACTED]'
+        );
+
+        return {
+          id: req.id,
+          method: req.method,
+          url,
+          remoteAddress: req.ip
+        };
+      }
+    }
+  })
+);
 
 // Brotli JSON compression for admin endpoints
 app.use((req, res, next) => {
@@ -135,11 +150,13 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// Global error handler
+//// Global error handler
 app.use((err, req, res, next) => {
   const reqId = req.id || 'unknown';
   const safeMessage = err?.message ? String(err.message).split('?')[0] : 'Unknown error';
-  console.error(`[SERVER ERROR] [${reqId}]`, safeMessage);
+  const log = req.log || logger;
+
+  log.error({ reqId, error: safeMessage }, '[SERVER ERROR]');
 
   if (res.headersSent) {
     return req.socket?.destroy();
@@ -151,8 +168,8 @@ app.use((err, req, res, next) => {
 if (!process.env.VERCEL) {
   const PORT = parseInt(process.env.PORT, 10) || 3000;
   app.listen(PORT, () => {
-    console.log(`[SERVER] Listening on port ${PORT}`);
-    console.log(`[SERVER] Memory ceiling: ${memoryGovernor.MEMORY_CEILING_MB}MB`);
+    logger.info(`[SERVER] Listening on port ${PORT}`);
+    logger.info(`[SERVER] Memory ceiling: ${memoryGovernor.MEMORY_CEILING_MB}MB`);
   });
 }
 
