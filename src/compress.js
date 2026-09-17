@@ -1558,9 +1558,10 @@ eventLoopLag = await measureEventLoopLag();
       }
 
       // ENCODE
-      let outputBuffer;
-      let contentType;
-      const encodeStart = Date.now();
+   let outputBuffer;
+   let contentType;
+   const encodeStart = Date.now();
+   let encodeTime = 0;
       // Encode-level adaptive admission
       if (!concurrencyGovernor.tryAdmitEncode()) {
         res.status(503);
@@ -1650,18 +1651,19 @@ eventLoopLag = await measureEventLoopLag();
           }
         }
       } finally {
-        activeEncodes--;
-        concurrencyGovernor.releaseEncode({
-          success: !clientDisconnected && !signal.aborted,
-          timedOut: signal.aborted,
-          encodeTimeMs: finalEncodeTime
-        });
-      }
-      const encodeEnd = Date.now();
-      const encodeTime = encodeEnd - encodeStart;
+     const encodeEnd = Date.now();
+     encodeTime = encodeEnd - encodeStart;
+     finalEncodeTime = encodeTime;
 
-      recordEncodeTime(encodeTime, totalPixelCost, outputFormat);
-      finalEncodeTime = encodeTime;
+     activeEncodes--;
+     concurrencyGovernor.releaseEncode({
+       success: !clientDisconnected && !signal.aborted,
+       timedOut: signal.aborted,
+       encodeTimeMs: encodeTime
+     });
+   }
+
+   recordEncodeTime(encodeTime, totalPixelCost, outputFormat);
       res.setHeader('X-Processing-Time', `${encodeTime}ms`);
       res.setHeader('X-Encode-Effort', String(effort));
 
