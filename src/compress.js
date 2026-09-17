@@ -909,6 +909,7 @@ function chooseOutputFormat(metadata, totalPixelCost) {
 export default async function compress(req, res, buffer, governor) {
   const memGov = governor || memoryGovernor;
   const reqId = req.id || 'unknown';
+  const log = req.log || console;
 
   if (isShuttingDown) {
     res.status(503);
@@ -1018,16 +1019,16 @@ let eventLoopLag;
 
       // 1. Check Dimensions
       if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-        console.log(JSON.stringify({
-          event: 'DIMENSION_OVERLORD_RESIZE',
-          reqId,
-          url: logUrl,
-          mode,
-          width,
-          height,
-          reason: 'RESIZED_DIMENSION',
-          maxDimension: MAX_DIMENSION
-        }));
+        log.info({
+       event: 'DIMENSION_OVERLORD_RESIZE',
+       reqId,
+       url: logUrl,
+       mode,
+       width,
+       height,
+       reason: 'RESIZED_DIMENSION',
+       maxDimension: MAX_DIMENSION
+     });
         res.setHeader('X-Dimension-Overlord', 'RESIZED_DIMENSION');
       }
 
@@ -1037,35 +1038,35 @@ let eventLoopLag;
       const aspectRatio = maxDim / minDim;
 
       if (aspectRatio > MAX_ASPECT_RATIO) {
-        console.log(JSON.stringify({
-          event: 'DIMENSION_OVERLORD_ASPECT',
-          reqId,
-          url: logUrl,
-          mode,
-          width,
-          height,
-          aspectRatio: Number(aspectRatio.toFixed(2)),
-          reason: 'ASPECT_EXCEEDED',
-          maxAspectRatio: MAX_ASPECT_RATIO
-        }));
+        log.info({
+       event: 'DIMENSION_OVERLORD_ASPECT',
+       reqId,
+       url: logUrl,
+       mode,
+       width,
+       height,
+       aspectRatio: Number(aspectRatio.toFixed(2)),
+       reason: 'ASPECT_EXCEEDED',
+       maxAspectRatio: MAX_ASPECT_RATIO
+     });
         res.setHeader('X-Dimension-Overlord', 'ASPECT_EXCEEDED');
       }
     }
 
     res.setHeader('X-Format-Reason', formatDecision.reason);
 
-    console.log(JSON.stringify({
-      event: 'FORMAT_DECISION',
-      reqId,
-      url: logUrl,
-      format: outputFormat,
-      reason: formatDecision.reason,
-      width,
-      height,
-      frames,
-      totalPixelCost,
-      avifMaxPixels: AVIF_MAX_PIXELS
-    }));
+    log.info({
+   event: 'FORMAT_DECISION',
+   reqId,
+   url: logUrl,
+   format: outputFormat,
+   reason: formatDecision.reason,
+   width,
+   height,
+   frames,
+   totalPixelCost,
+   avifMaxPixels: AVIF_MAX_PIXELS
+ });
     
     const viewportCacheKey = req.opts?.maxDim > 0
   ? 'md-fixed'
