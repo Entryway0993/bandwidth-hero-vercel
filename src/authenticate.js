@@ -103,6 +103,11 @@ function parseBasicAuth(req) {
 function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   if (a.length === 0 || b.length === 0) return false;
+
+  function keyIdentity(value) {
+  if (!value || typeof value !== 'string') return null;
+  return crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+  }
   
   const hashA = crypto.createHash('sha256').update(a).digest();
   const hashB = crypto.createHash('sha256').update(b).digest();
@@ -134,52 +139,90 @@ export default async function authenticate(req, res, next) {
   }
 
   // Item 9: Rate limit successful requests per IP
-  if (await isRequestRateLimited(clientKey)) {
-    res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
-    return res.status(429).json({ error: 'Too many requests. Try again later.' });
-  }
+if (await isRequestRateLimited(clientKey)) {
+  res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
+  return res.status(429).json({ error: 'Too many requests. Try again later.' });
+}
+
+// Item 3: Per-key rate limit check helper
+async function checkKeyRateLimit(identity) {
+  if (!identity) return false;
+  const keyScope = `key:${identity}`;
+  return isRequestRateLimited(keyScope);
+}
+
+async function recordKeyUsage(identity) {
+  if (!identity) return;
+  const keyScope = `key:${identity}`;
+  await recordSuccessfulRequest(keyScope);
+}
 
   // 0. Check Internal Service Key (from Cloudflare Worker - F10 FIX)
   const serviceKey = req.headers['x-vercel-service-key'];
-  if (VERCEL_SERVICE_KEY && serviceKey && safeCompare(serviceKey, VERCEL_SERVICE_KEY)) {
-    await clearAuthFailure(clientKey);
-    await recordSuccessfulRequest(clientKey);
-    return next();
+if (VERCEL_SERVICE_KEY && serviceKey && safeCompare(serviceKey, VERCEL_SERVICE_KEY)) {
+  const identity = keyIdentity(serviceKey);
+  if (await checkKeyRateLimit(identity)) {
+    res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
+    return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
   }
+  await clearAuthFailure(clientKey);
+  await recordSuccessfulRequest(clientKey);
+  await recordKeyUsage(identity);
+  return next();
+}
 
   // 1. Check Header API Key (preferred)
   const headerKey = req.headers['x-api-key'];
-  if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
-    await clearAuthFailure(clientKey);
-    return next();
+if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
+  const identity = keyIdentity(headerKey);
+  if (await checkKeyRateLimit(identity)) {
+    res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
+    return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
   }
+  await clearAuthFailure(clientKey);
+  await recordSuccessfulRequest(clientKey);
+  await recordKeyUsage(identity);
+  return next();
+}
 
   // 2. Check Query String API Key (F5-MODIFIED: legacy support)
   if (ALLOW_QUERY_API_KEY) {
-    let queryKey = req.query.api || req.query.apikey || req.query.api_key;
-
-    if (typeof queryKey === 'string') {
-      queryKey = queryKey.split(/[\/\?]/)[0].trim();
-    }
-
-    if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
-      await clearAuthFailure(clientKey);
-      return next();
-    }
+  let queryKey = req.query.api || req.query.apikey || req.query.api_key;
+  if (typeof queryKey === 'string') {
+    queryKey = queryKey.split(/[\/\?]/)[0].trim();
   }
+  if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
+    const identity = keyIdentity(String(queryKey));
+    if (await checkKeyRateLimit(identity)) {
+      res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
+      return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
+    }
+    await clearAuthFailure(clientKey);
+    await recordSuccessfulRequest(clientKey);
+    await recordKeyUsage(identity);
+    return next();
+  }
+}
 
   // 3. Check Basic Auth
   if (LOGIN && PASSWORD) {
-    const credentials = parseBasicAuth(req);
-    if (
-      credentials &&
-      safeCompare(credentials.name, LOGIN) &&
-      safeCompare(credentials.pass, PASSWORD)
-    ) {
-      await clearAuthFailure(clientKey);
-      return next();
+  const credentials = parseBasicAuth(req);
+  if (
+    credentials &&
+    safeCompare(credentials.name, LOGIN) &&
+    safeCompare(credentials.pass, PASSWORD)
+  ) {
+    const identity = keyIdentity(`${credentials.name}:${credentials.pass}`);
+    if (await checkKeyRateLimit(identity)) {
+      res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
+      return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
     }
+    await clearAuthFailure(clientKey);
+    await recordSuccessfulRequest(clientKey);
+    await recordKeyUsage(identity);
+    return next();
   }
+}
 
   // 4. Deny access
   await recordAuthFailure(clientKey);
