@@ -250,8 +250,23 @@ async function withFallback(distributedFn, memoryFn) {
   }
 }
 
+const KEY_RATE_LIMIT_SCOPE = 'req-key';
+
+function keyIncrement(params) {
+  const scopedParams = {
+    ...params,
+    scope: KEY_RATE_LIMIT_SCOPE
+  };
+
+  return withFallback(
+    () => distributedIncrement(scopedParams),
+    () => memoryIncrement(scopedParams)
+  );
+}
+
 export default {
   DISTRIBUTED_ENABLED,
+  KEY_RATE_LIMIT_SCOPE,
 
   peek(params) {
     return withFallback(
@@ -272,5 +287,7 @@ export default {
       () => distributedReset(params),
       () => memoryReset(params)
     );
-  }
+  },
+
+  keyIncrement
 };
