@@ -611,8 +611,6 @@ function judgeQuality(analysis, metadata, mode) {
   const aspectRatio = height / Math.max(width, 1);
   const isVerticalStrip = aspectRatio > 2.5;
 
-  // Explicit mode takes priority over heuristic detection.
-  // 'auto' or undefined falls back to content analysis.
   const explicitMangaModes = ['manga', 'comic', 'strip', 'webtoon', 'manhwa', 'manhua'];
   const explicitPhotoModes = ['photo', 'normal'];
 
@@ -622,77 +620,71 @@ function judgeQuality(analysis, metadata, mode) {
   } else if (explicitPhotoModes.includes(mode)) {
     isMangaContent = false;
   } else {
-    // auto / undefined: fall back to heuristic detection
     isMangaContent = analysis.isMangaStrip || analysis.isMangaPage ||
-      analysis.isMangaWidePage;
+                     analysis.isMangaWidePage;
   }
 
-  // For vertical strips, width is the detail-level indicator.
-  // Multiply by 2 to normalize against photo resolution expectations.
   const resolution = isVerticalStrip
     ? Math.min(width * 2, 3000)
     : Math.max(width, height);
 
   let score = 0;
 
-  // Sharpness
+  // Sharpness — relaxed thresholds (~30% lower)
   if (isMangaContent) {
-    // Manga: sharp lines are the primary quality signal
-    if (sharpness > 60) score += 35;
-    else if (sharpness > 40) score += 30;
-    else if (sharpness > 25) score += 22;
-    else if (sharpness > 15) score += 14;
-    else if (sharpness > 8) score += 7;
+    if (sharpness > 45) score += 35;
+    else if (sharpness > 30) score += 30;
+    else if (sharpness > 18) score += 22;
+    else if (sharpness > 10) score += 14;
+    else if (sharpness > 5) score += 7;
   } else {
-    // Photo: original thresholds
-    if (sharpness > 80) score += 35;
-    else if (sharpness > 60) score += 28;
-    else if (sharpness > 40) score += 21;
-    else if (sharpness > 25) score += 14;
-    else if (sharpness > 15) score += 7;
+    if (sharpness > 60) score += 35;
+    else if (sharpness > 45) score += 28;
+    else if (sharpness > 30) score += 21;
+    else if (sharpness > 18) score += 14;
+    else if (sharpness > 10) score += 7;
   }
 
-  // Resolution
-  if (resolution > 2000) score += 25;
-  else if (resolution > 1500) score += 20;
-  else if (resolution > 1000) score += 15;
-  else if (resolution > 700) score += 10;
-  else if (resolution > 400) score += 5;
+  // Resolution — lowered thresholds
+  if (resolution > 1600) score += 25;
+  else if (resolution > 1200) score += 20;
+  else if (resolution > 800) score += 15;
+  else if (resolution > 500) score += 10;
+  else if (resolution > 250) score += 5;
 
-  // Entropy
+  // Entropy — widened acceptable ranges
   if (isMangaContent) {
-    // Manga: low entropy is normal for clean line art
-    if (entropy > 3 && entropy < 6) score += 25;
-    else if (entropy > 2 && entropy < 7) score += 20;
-    else if (entropy > 1.5 && entropy < 7.5) score += 14;
+    if (entropy > 2 && entropy < 7) score += 25;
+    else if (entropy > 1.5 && entropy < 8) score += 20;
+    else if (entropy > 1 && entropy < 8.5) score += 14;
     else score += 8;
   } else {
-    // Photo: original thresholds
-    if (entropy > 5 && entropy < 7) score += 25;
-    else if (entropy > 4 && entropy < 8) score += 18;
-    else if (entropy > 3 && entropy < 8.5) score += 12;
+    if (entropy > 4 && entropy < 8) score += 25;
+    else if (entropy > 3 && entropy < 9) score += 18;
+    else if (entropy > 2 && entropy < 9.5) score += 12;
     else score += 5;
   }
 
-  // Color variance
+  // Color variance — penalty removed, bonuses preserved
   if (isMangaContent && analysis.isGrayscale) {
-    // Grayscale manga: no penalty, small bonus for clean B&W
     if (colorVariance < 15) score += 5;
   } else if (colorVariance > 80) {
     score += 15;
   } else if (colorVariance > 40) {
-    score += 8;
-  } else if (colorVariance < 15 && !isMangaContent) {
-    score -= 10;
+    score += 10;
+  } else if (colorVariance > 20) {
+    score += 5;
   }
+  // No negative penalty for low color variance
 
+  // Grade thresholds — shifted down for less punitive grading
   let grade, qualityAdjust;
-  if (score >= 90) { grade = 'S'; qualityAdjust = -15; }
-  else if (score >= 75) { grade = 'A'; qualityAdjust = -10; }
-  else if (score >= 60) { grade = 'B'; qualityAdjust = -5; }
-  else if (score >= 45) { grade = 'C'; qualityAdjust = 0; }
-  else if (score >= 30) { grade = 'D'; qualityAdjust = 5; }
-  else if (score >= 15) { grade = 'E'; qualityAdjust = 10; }
+  if (score >= 85) { grade = 'S'; qualityAdjust = -15; }
+  else if (score >= 70) { grade = 'A'; qualityAdjust = -10; }
+  else if (score >= 55) { grade = 'B'; qualityAdjust = -5; }
+  else if (score >= 40) { grade = 'C'; qualityAdjust = 0; }
+  else if (score >= 25) { grade = 'D'; qualityAdjust = 5; }
+  else if (score >= 10) { grade = 'E'; qualityAdjust = 10; }
   else { grade = 'F'; qualityAdjust = 15; }
 
   return { grade, qualityAdjust, score };
@@ -1225,11 +1217,15 @@ eventLoopLag = await measureEventLoopLag();
         return Buffer.alloc(0);
       }
 
-      // Judge quality
-      let judgeResult = null;
-      if (ENABLE_JUDGE && allowEnhancements) {
-        judgeResult = judgeQuality(analysis, metadata, req.opts?.mode);
-      }
+      // Judge quality — skip for animated content (GIF / animated WebP).
+   // Animated images have inherently low sharpness, limited palettes,
+   // and low entropy. Running the judge on them produces unfairly low
+   // grades (D/E/F) that inflate quality and bloat the output WebP.
+   let judgeResult = null;
+   const isAnimatedForJudge = (metadata.pages || 1) > 1 || metadata.format === 'gif';
+   if (ENABLE_JUDGE && allowEnhancements && !isAnimatedForJudge) {
+     judgeResult = judgeQuality(analysis, metadata, req.opts?.mode);
+   }
 
       // Halftone / moire detection
       let halftoneResult = null;
