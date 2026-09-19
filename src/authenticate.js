@@ -104,6 +104,54 @@ function safeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   if (a.length === 0 || b.length === 0) return false;
 
+  const parsedKeyWindowMs = parseInt(process.env.KEY_RATE_LIMIT_WINDOW_MS, 10);
+const KEY_RATE_LIMIT_WINDOW_MS =
+  Number.isFinite(parsedKeyWindowMs) && parsedKeyWindowMs > 0
+    ? parsedKeyWindowMs
+    : REQ_RATE_LIMIT_WINDOW_MS;
+
+const parsedKeyMax = parseInt(process.env.KEY_RATE_LIMIT_MAX, 10);
+const KEY_RATE_LIMIT_MAX =
+  Number.isFinite(parsedKeyMax) && parsedKeyMax >= 0
+    ? parsedKeyMax
+    : REQ_RATE_LIMIT_MAX * 10;
+
+const parsedServiceKeyMax = parseInt(process.env.SERVICE_KEY_RATE_LIMIT_MAX, 10);
+const SERVICE_KEY_RATE_LIMIT_MAX =
+  Number.isFinite(parsedServiceKeyMax) && parsedServiceKeyMax >= 0
+    ? parsedServiceKeyMax
+    : 0;
+
+function credentialIdentity(label, secret) {
+  if (!secret || typeof secret !== 'string') return null;
+
+  const hash = crypto
+    .createHash('sha256')
+    .update(secret)
+    .digest('hex')
+    .slice(0, 16);
+
+  return `${label}:${hash}`;
+}
+
+async function allowKeyRequest(identity, max) {
+  if (!identity || !Number.isFinite(max) || max <= 0) {
+    return true;
+  }
+
+  try {
+    const result = await rateLimiter.keyIncrement({
+      key: identity,
+      windowMs: KEY_RATE_LIMIT_WINDOW_MS,
+      max
+    });
+
+    return result.allowed !== false;
+  } catch {
+    return true;
+  }
+  }
+
   function keyIdentity(value) {
   if (!value || typeof value !== 'string') return null;
   return crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
@@ -160,28 +208,33 @@ async function recordKeyUsage(identity) {
   // 0. Check Internal Service Key (from Cloudflare Worker - F10 FIX)
   const serviceKey = req.headers['x-vercel-service-key'];
 if (VERCEL_SERVICE_KEY && serviceKey && safeCompare(serviceKey, VERCEL_SERVICE_KEY)) {
-  const identity = keyIdentity(serviceKey);
-  if (await checkKeyRateLimit(identity)) {
-    res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
-    return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
+  const serviceIdentity = credentialIdentity('svc', VERCEL_SERVICE_KEY);
+
+  if (!(await allowKeyRequest(serviceIdentity, SERVICE_KEY_RATE_LIMIT_MAX))) {
+    res.setHeader('Retry-After', String(Math.ceil(KEY_RATE_LIMIT_WINDOW_MS / 1000)));
+    return res.status(429).json({
+      error: 'Too many requests for this service credential. Try again later.'
+    });
   }
+
   await clearAuthFailure(clientKey);
   await recordSuccessfulRequest(clientKey);
-  await recordKeyUsage(identity);
   return next();
 }
 
   // 1. Check Header API Key (preferred)
-  const headerKey = req.headers['x-api-key'];
+ const headerKey = req.headers['x-api-key'];
 if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
-  const identity = keyIdentity(headerKey);
-  if (await checkKeyRateLimit(identity)) {
-    res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
-    return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
+  const apiIdentity = credentialIdentity('api', API_KEY);
+
+  if (!(await allowKeyRequest(apiIdentity, KEY_RATE_LIMIT_MAX))) {
+    res.setHeader('Retry-After', String(Math.ceil(KEY_RATE_LIMIT_WINDOW_MS / 1000)));
+    return res.status(429).json({
+      error: 'Too many requests for this API key. Try again later.'
+    });
   }
+
   await clearAuthFailure(clientKey);
-  await recordSuccessfulRequest(clientKey);
-  await recordKeyUsage(identity);
   return next();
 }
 
@@ -191,15 +244,18 @@ if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
   if (typeof queryKey === 'string') {
     queryKey = queryKey.split(/[\/\?]/)[0].trim();
   }
+
   if (API_KEY && queryKey && safeCompare(String(queryKey), API_KEY)) {
-    const identity = keyIdentity(String(queryKey));
-    if (await checkKeyRateLimit(identity)) {
-      res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
-      return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
+    const apiIdentity = credentialIdentity('api', API_KEY);
+
+    if (!(await allowKeyRequest(apiIdentity, KEY_RATE_LIMIT_MAX))) {
+      res.setHeader('Retry-After', String(Math.ceil(KEY_RATE_LIMIT_WINDOW_MS / 1000)));
+      return res.status(429).json({
+        error: 'Too many requests for this API key. Try again later.'
+      });
     }
+
     await clearAuthFailure(clientKey);
-    await recordSuccessfulRequest(clientKey);
-    await recordKeyUsage(identity);
     return next();
   }
 }
@@ -212,14 +268,16 @@ if (API_KEY && headerKey && safeCompare(headerKey, API_KEY)) {
     safeCompare(credentials.name, LOGIN) &&
     safeCompare(credentials.pass, PASSWORD)
   ) {
-    const identity = keyIdentity(`${credentials.name}:${credentials.pass}`);
-    if (await checkKeyRateLimit(identity)) {
-      res.setHeader('Retry-After', String(Math.ceil(REQ_RATE_LIMIT_WINDOW_MS / 1000)));
-      return res.status(429).json({ error: 'Too many requests for this key. Try again later.' });
+    const basicIdentity = credentialIdentity('basic', `${credentials.name}:${credentials.pass}`);
+
+    if (!(await allowKeyRequest(basicIdentity, KEY_RATE_LIMIT_MAX))) {
+      res.setHeader('Retry-After', String(Math.ceil(KEY_RATE_LIMIT_WINDOW_MS / 1000)));
+      return res.status(429).json({
+        error: 'Too many requests for this credential. Try again later.'
+      });
     }
+
     await clearAuthFailure(clientKey);
-    await recordSuccessfulRequest(clientKey);
-    await recordKeyUsage(identity);
     return next();
   }
 }
