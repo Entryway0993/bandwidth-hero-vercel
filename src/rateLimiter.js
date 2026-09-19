@@ -14,6 +14,68 @@ const DISTRIBUTED_TIMEOUT_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 750;
 })();
 
+function safeInt(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const UPSTASH_CIRCUIT_FAILURE_THRESHOLD = safeInt(
+  process.env.UPSTASH_CIRCUIT_FAILURE_THRESHOLD,
+  5
+);
+
+const UPSTASH_CIRCUIT_OPEN_MS = safeInt(
+  process.env.UPSTASH_CIRCUIT_OPEN_MS,
+  10000
+);
+
+const upstashCircuit = {
+  failures: 0,
+  openUntil: 0,
+  halfOpenProbe: false
+};
+
+function assertUpstashCircuitAllows() {
+  if (!DISTRIBUTED_ENABLED) return;
+
+  const now = Date.now();
+
+  if (now < upstashCircuit.openUntil) {
+    throw new Error('UPSTASH_CIRCUIT_OPEN');
+  }
+
+  if (upstashCircuit.openUntil > 0) {
+    if (upstashCircuit.halfOpenProbe) {
+      throw new Error('UPSTASH_CIRCUIT_HALF_OPEN_BUSY');
+    }
+
+    upstashCircuit.halfOpenProbe = true;
+  }
+}
+
+function recordUpstashSuccess() {
+  upstashCircuit.failures = 0;
+  upstashCircuit.openUntil = 0;
+  upstashCircuit.halfOpenProbe = false;
+}
+
+function recordUpstashFailure() {
+  const wasHalfOpen = upstashCircuit.halfOpenProbe;
+  upstashCircuit.halfOpenProbe = false;
+
+  if (wasHalfOpen) {
+    upstashCircuit.openUntil = Date.now() + UPSTASH_CIRCUIT_OPEN_MS;
+    return;
+  }
+
+  upstashCircuit.failures += 1;
+
+  if (upstashCircuit.failures >= UPSTASH_CIRCUIT_FAILURE_THRESHOLD) {
+    upstashCircuit.openUntil = Date.now() + UPSTASH_CIRCUIT_OPEN_MS;
+    upstashCircuit.failures = 0;
+  }
+}
+
 function safeKey(value) {
   return encodeURIComponent(String(value || '')).replace(/%/g, '_');
 }
@@ -87,6 +149,8 @@ function memoryReset({ scope, key, windowMs }) {
 }
 
 async function upstashCommand(commands) {
+  assertUpstashCircuitAllows();
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DISTRIBUTED_TIMEOUT_MS);
 
@@ -105,7 +169,13 @@ async function upstashCommand(commands) {
       throw new Error('UPSTASH_HTTP_ERROR');
     }
 
-    return await res.json();
+    const json = await res.json();
+    recordUpstashSuccess();
+
+    return json;
+  } catch (err) {
+    recordUpstashFailure();
+    throw err;
   } finally {
     clearTimeout(timer);
   }
