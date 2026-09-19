@@ -37,10 +37,27 @@ const RAW_VAULT_MAX_BYTES = 20 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRY = 4 * 1024 * 1024;
 const RAW_VAULT_MAX_ENTRIES = 30;
 
+const RAW_VAULT_ENTRY_OVERHEAD = 512;
+
+function vaultEntrySize(entry, key) {
+  const rawSize = Number.isFinite(entry?.size)
+    ? entry.size
+    : Buffer.byteLength(entry?.raw || '');
+
+  const keySize = Buffer.byteLength(String(key || ''));
+  const etagSize = Buffer.byteLength(String(entry?.etag || ''));
+  const lastModifiedSize = Buffer.byteLength(String(entry?.lastModified || ''));
+
+  return Math.max(
+    1,
+    rawSize + keySize + etagSize + lastModifiedSize + RAW_VAULT_ENTRY_OVERHEAD
+  );
+}
+
 const RAW_VAULT = new LRUCache({
   max: RAW_VAULT_MAX_ENTRIES,
   maxSize: RAW_VAULT_MAX_BYTES,
-  sizeCalculation: (entry) => entry.size
+  sizeCalculation: vaultEntrySize
 });
 
 function vaultGet(url) {
@@ -49,7 +66,13 @@ function vaultGet(url) {
 
 function vaultSet(url, raw, etag, lastModified) {
   if (raw.length > RAW_VAULT_MAX_ENTRY) return;
-  RAW_VAULT.set(url, { raw, etag, lastModified, size: raw.length });
+
+  const entry = { raw, etag, lastModified, size: raw.length };
+  const projectedSize = vaultEntrySize(entry, url);
+
+  if (projectedSize > RAW_VAULT_MAX_BYTES) return;
+
+  RAW_VAULT.set(url, entry);
 }
 
 const chromeDispatcher = new Agent({
