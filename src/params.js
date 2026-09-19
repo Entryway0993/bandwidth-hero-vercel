@@ -2,6 +2,62 @@ import { parseSafeUrl } from './urlGuard.js';
 
 const PROTOCOL_REGEX = /^https?:\/\//i;
 
+const BLOCKED_QUERY_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function firstQueryString(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === 'string') {
+        return item;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function getQueryString(req, name) {
+  if (!req || typeof req.query !== 'object' || req.query === null) {
+    return undefined;
+  }
+
+  if (BLOCKED_QUERY_NAMES.has(name)) {
+    return undefined;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(req.query, name)) {
+    return undefined;
+  }
+
+  const value = req.query[name];
+
+  if (isPlainObject(value)) {
+    return undefined;
+  }
+
+  return firstQueryString(value);
+}
+
+function getFirstQueryString(req, names) {
+  for (const name of names) {
+    const value = getQueryString(req, name);
+
+    if (value !== undefined) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
 const clampInt = (value, fallback, min, max) => {
   const n = parseInt(value, 10);
   return Number.isNaN(n) ? fallback : Math.min(Math.max(n, min), max);
@@ -42,19 +98,16 @@ const ALLOWED_MODES = new Set([
 ]);
 
 // F13-MODIFIED: Safe rotation increments only
-const SAFE_ROTATIONS = new Set([90, 180, 270]);
-
-const INTERNAL_FORMAT_PARAM = '__bw_fmt';
-const INTERNAL_FORMATS = new Set(['jpeg', 'avif', 'webp']);
-
 function parseBoolean(value, defaultValue) {
   if (Array.isArray(value)) {
-    value = value[0];
+    value = value.find((item) => typeof item === 'string');
   }
 
-  if (value === undefined) return defaultValue;
+  if (value === undefined || value === null || typeof value !== 'string') {
+    return defaultValue;
+  }
 
-  const str = String(value).trim().toLowerCase();
+  const str = value.trim().toLowerCase();
 
   if (['1', 'true', 'yes', 'on'].includes(str)) return true;
   if (['0', 'false', 'no', 'off'].includes(str)) return false;
@@ -80,10 +133,7 @@ function parseRotation(value) {
 }
 
 function parseInternalFormat(req) {
-  const raw = Array.isArray(req.query[INTERNAL_FORMAT_PARAM])
-    ? req.query[INTERNAL_FORMAT_PARAM][0]
-    : req.query[INTERNAL_FORMAT_PARAM];
-
+  const raw = getQueryString(req, INTERNAL_FORMAT_PARAM);
   const fmt = String(raw || '').toLowerCase();
 
   return INTERNAL_FORMATS.has(fmt) ? fmt : null;
@@ -93,9 +143,9 @@ function parseFormat(req) {
   const internalFormat = parseInternalFormat(req);
   if (internalFormat) return internalFormat;
 
-  if (parseBoolean(req.query.jpeg, false)) return 'jpeg';
-  if (parseBoolean(req.query.avif, false)) return 'avif';
-  if (parseBoolean(req.query.webp, false)) return 'webp';
+  if (parseBoolean(getQueryString(req, 'jpeg'), false)) return 'jpeg';
+  if (parseBoolean(getQueryString(req, 'avif'), false)) return 'avif';
+  if (parseBoolean(getQueryString(req, 'webp'), false)) return 'webp';
 
   if (ALLOW_ACCEPT_FALLBACK) {
     const accept = String(req.headers.accept || '').toLowerCase();
@@ -135,10 +185,25 @@ function extractHiddenUrlFromRaw(req) {
 
 function params(req, res, next) {
   try {
-    let { url } = req.query;
+    let url;
 
-    // F16: removed unreachable hiddenUrl === null check
-    if (!url) {
+    if (
+      req.query &&
+      typeof req.query === 'object' &&
+      Object.prototype.hasOwnProperty.call(req.query, 'url')
+    ) {
+      url = req.query.url;
+    }
+
+    if (Array.isArray(url)) {
+      return res.status(400).json({ error: 'Multiple URL parameters are not allowed.' });
+    }
+
+    if (isPlainObject(url)) {
+      return res.status(400).json({ error: 'Invalid URL parameter.' });
+    }
+
+    if (url === undefined || url === null || url === '') {
       const hiddenUrl = extractHiddenUrlFromRaw(req);
 
       if (hiddenUrl) {
@@ -148,10 +213,6 @@ function params(req, res, next) {
 
     if (url === undefined || url === null || url === '') {
       return res.status(200).send('bandwidth-hero-proxy');
-    }
-
-    if (Array.isArray(url)) {
-      return res.status(400).json({ error: 'Multiple URL parameters are not allowed.' });
     }
 
     if (typeof url !== 'string') {
@@ -189,31 +250,30 @@ function params(req, res, next) {
     req.opts = {
       url: safeUrl.href,
       format: parseFormat(req),
-      grayscale: parseBoolean(req.query.bw, DEFAULT_GRAYSCALE),
+      grayscale: parseBoolean(getQueryString(req, 'bw'), DEFAULT_GRAYSCALE),
       quality: parseQuality(
-        req.query.l ?? req.query.q ?? req.query.quality,
+        getFirstQueryString(req, ['l', 'q', 'quality']),
         baseQuality,
         MIN_QUALITY,
         MAX_QUALITY
       ),
       maxDim: clampInt(
-        req.query.max_dim ?? req.query.maxdim ?? req.query.max,
+        getFirstQueryString(req, ['max_dim', 'maxdim', 'max']),
         baseMaxDim,
         0,
         4096
       ),
       maxStripWidth: clampInt(
-        req.query.strip_w ?? req.query.stripw ?? req.query.strip_width,
+        getFirstQueryString(req, ['strip_w', 'stripw', 'strip_width']),
         baseStripWidth,
         0,
         4096
       ),
-      // F13-MODIFIED: safe rotation
-      rotate: parseRotation(req.query.rotate)
+      rotate: parseRotation(getQueryString(req, 'rotate'))
     };
-
+    
     // F12-MODIFIED: Normalize mode, raw/bypass treated as auto
-    const rawMode = Array.isArray(req.query.mode) ? req.query.mode[0] : req.query.mode;
+    const rawMode = getQueryString(req, 'mode');
     const modeInput = String(rawMode || '').toLowerCase();
     const mode = ALLOWED_MODES.has(modeInput) ? modeInput : 'auto';
 
@@ -237,24 +297,26 @@ function params(req, res, next) {
       sharpenDefault = undefined;
     }
 
+    let sharpenQuery = getQueryString(req, 'sharpen');
+
     if (mode === 'manga' || mode === 'comic') {
       req.opts.maxDim = req.opts.maxDim || baseMaxDim;
       req.opts.maxStripWidth = 0;
-      if (req.query.sharpen === undefined) req.query.sharpen = '1';
+      if (sharpenQuery === undefined) sharpenQuery = '1';
 
     } else if (mode === 'strip' || mode === 'webtoon' || mode === 'manhwa' || mode === 'manhua') {
       req.opts.maxDim = 0;
       req.opts.maxStripWidth = req.opts.maxStripWidth || baseStripWidth;
-      if (req.query.sharpen === undefined) req.query.sharpen = '1';
+      if (sharpenQuery === undefined) sharpenQuery = '1';
 
     } else if (mode === 'photo' || mode === 'normal') {
       req.opts.maxDim = req.opts.maxDim || baseMaxDim;
       req.opts.maxStripWidth = 0;
-      if (req.query.sharpen === undefined) req.query.sharpen = '0';
+      if (sharpenQuery === undefined) sharpenQuery = '0';
     }
 
     req.opts.mode = mode;
-    req.opts.sharpen = parseBoolean(req.query.sharpen, sharpenDefault);
+    req.opts.sharpen = parseBoolean(sharpenQuery, sharpenDefault);
 
     return next();
   } catch (err) {
