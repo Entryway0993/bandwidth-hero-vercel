@@ -647,7 +647,15 @@ export default async function proxy(req, res) {
   }
 
   if (statusCode === 403) {
-    const retryHeaders = { ...activeHeaders, 'user-agent': getRandomUA() };
+    // WAFs often block requests where Referer matches the image origin.
+    // Strip referer on retry to mimic native app/direct load behavior.
+    const { referer, 'sec-fetch-site': _sfs, ...restHeaders } = activeHeaders;
+    const retryHeaders = {
+      ...restHeaders,
+      'user-agent': getRandomUA(),
+      'sec-fetch-site': 'none'
+    };
+
     try {
       response = await safeRequest(activeUrl, retryHeaders, req.signal);
       statusCode = response.statusCode;
