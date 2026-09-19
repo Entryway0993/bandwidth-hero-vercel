@@ -623,8 +623,8 @@ export default async function proxy(req, res) {
     statusCode = response.statusCode;
     responseHeaders = response.headers;
 
-    if (isWorkerFetch && statusCode >= 500 && statusCode < 600) {
-      throw new Error('WORKER_5XX_FAILURE');
+    if (isWorkerFetch && (statusCode >= 500 || statusCode === 403 || statusCode === 404)) {
+      throw new Error('WORKER_RELAY_FAILURE');
     }
   } catch (err) {
     if (isClientAborted(req)) return;
