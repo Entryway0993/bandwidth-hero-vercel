@@ -98,6 +98,11 @@ const ALLOWED_MODES = new Set([
 ]);
 
 // F13-MODIFIED: Safe rotation increments only
+const SAFE_ROTATIONS = new Set([90, 180, 270]);
+
+const INTERNAL_FORMAT_PARAM = '__bw_fmt';
+const INTERNAL_FORMATS = new Set(['jpeg', 'avif', 'webp']);
+
 function parseBoolean(value, defaultValue) {
   if (Array.isArray(value)) {
     value = value.find((item) => typeof item === 'string');
