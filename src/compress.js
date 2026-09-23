@@ -519,7 +519,7 @@ async function detectSkew(buffer) {
       }
     }
 
-    if (count < 100) return 0;
+    if (count < 500) return 0;
 
     const meanX = sumX / count, meanY = sumY / count;
     const covXX = sumXX / count - meanX * meanX;
@@ -527,7 +527,7 @@ async function detectSkew(buffer) {
     const covXY = sumXY / count - meanX * meanY;
     const angle = 0.5 * Math.atan2(2 * covXY, covXX - covYY) * (180 / Math.PI);
 
-    if (Math.abs(angle) > 1.5 && Math.abs(angle) < 15) return angle;
+    if (Math.abs(angle) > 5 && Math.abs(angle) < 15) return angle;
     return 0;
   } catch {
     return 0;
@@ -1201,13 +1201,11 @@ eventLoopLag = await measureEventLoopLag();
         }
       }
 
-      // Deskew
-      let skewAngle = 0;
-      if (ENABLE_DESKEW && allowEnhancements && !isMangaMode && !isStripMode && !analysis.isMangaStrip && !analysis.isMangaPage && !analysis.isMangaWidePage) {
-        skewAngle = await detectSkew(buffer);
-        if (skewAngle !== 0) {
-          res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
-          recordMetric('deskew');
+      // Deskew — only for grayscale/scanned document content.
+   // Photos, anime, and colorful content produce false positives.
+   let skewAngle = 0;
+   if (ENABLE_DESKEW && allowEnhancements && analysis.isGrayscale && !isMangaMode && !isStripMode && !analysis.isMangaStrip && !analysis.isMangaPage && !analysis.isMangaWidePage) {
+     skewAngle = await detectSkew(buffer);
         }
       }
 
