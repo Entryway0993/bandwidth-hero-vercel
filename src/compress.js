@@ -1201,11 +1201,14 @@ eventLoopLag = await measureEventLoopLag();
         }
       }
 
-      // Deskew — only for grayscale/scanned document content.
+       // Deskew — only for grayscale/scanned document content.
    // Photos, anime, and colorful content produce false positives.
    let skewAngle = 0;
    if (ENABLE_DESKEW && allowEnhancements && analysis.isGrayscale && !isMangaMode && !isStripMode && !analysis.isMangaStrip && !analysis.isMangaPage && !analysis.isMangaWidePage) {
      skewAngle = await detectSkew(buffer);
+        if (skewAngle !== 0) {
+          res.setHeader('X-Deskew-Angle', skewAngle.toFixed(2));
+          recordMetric('deskew');
         }
       }
 
