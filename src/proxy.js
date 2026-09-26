@@ -646,8 +646,9 @@ export default async function proxy(req, res) {
     }
   }
 
-  if (statusCode === 403) {
-    // WAFs often block requests where Referer matches the image origin.
+  if (statusCode === 403 || statusCode === 404) {
+    // WAFs/CDNs often block requests where Referer matches the image origin,
+    // sometimes returning 403, sometimes 404 to hide the file's existence.
     // Strip referer on retry to mimic native app/direct load behavior.
     const { referer, 'sec-fetch-site': _sfs, ...restHeaders } = activeHeaders;
     const retryHeaders = {
